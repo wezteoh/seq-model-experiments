@@ -1,0 +1,63 @@
+# Training run config
+train:
+  seed: 42
+  validate_at_start: true
+  test: true
+  ckpt: null
+  ckpt_dir: ~/ckpt
+
+# Data config (MNIST sequence task)
+dataset:
+  dataset: mnist
+  bsz: 128
+  num_workers: 0
+  data_dir: ~/data
+
+# Small model for speed (used by CPU class after the code tweak below)
+model:
+  args:
+    embedding: false
+    n_layer: 4
+    d_model: 64
+    d_intermediate: 0
+    vocab_size: 256
+    ssm_cfg:
+      layer: Mamba2
+      d_state: 128
+      d_conv: 4
+      expand: 4
+      headdim: 16
+      ngroups: 1
+      chunk_size: 16
+    rms_norm: true
+    fused_add_norm: true
+    residual_in_fp32: true
+
+# Optimizer
+lr: 0.001
+weight_decay: 0.01
+lr_schedule: true
+pct_start: 0.1
+total_steps: null
+num_samples_while_training: 4
+sample_prefix_length: 256
+task_type: generation
+use_fused_kernel: true
+
+# Lightning Trainer
+trainer:
+  accelerator: gpu
+  devices: 1
+  precision: 32
+  max_epochs: 100
+  fast_dev_run: false          # one batch train/val/test and exit
+  limit_train_batches: null       # safety; only a couple batches
+  limit_val_batches: null
+  limit_test_batches: null
+  log_every_n_steps: null
+  enable_checkpointing: true
+
+wandb:
+  project: mamba2-mnist
+  name: model
+callbacks: {}

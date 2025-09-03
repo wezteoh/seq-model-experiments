@@ -1,0 +1,76 @@
+# Training run config
+train:
+  seed: 42
+  validate_at_start: true
+  test: true
+  ckpt: true
+  pretrained_model_path: null
+  pretrained_model_strict_load: true
+  ignore_pretrained_layers: []
+  pretrained_freeze_encoder: false
+
+# Data config (MNIST sequence task)
+dataset:
+  dataset: mnist
+  bsz: 128
+  num_workers: 4
+  data_dir: ./data
+
+# Optimizer / LR schedule
+lr: 0.001
+weight_decay: 0.01
+lr_schedule: true
+pct_start: 0.1
+total_steps: null           # let Lightning infer; or set an int
+num_samples_while_training: 16
+
+# Trainer (PyTorch Lightning)
+trainer:
+  max_epochs: 5
+  accelerator: cpu          # set to 'gpu' for CUDA
+  devices: 1
+  precision: 32
+  log_every_n_steps: 50
+  enable_checkpointing: false
+  deterministic: false
+  gradient_clip_val: 0.0
+  accumulate_grad_batches: 1
+
+# Logging
+wandb: null                 # or set: {project: your_project, name: run_name, entity: your_entity}
+
+# Callbacks (none by default)
+callbacks: {}
+
+# Model
+# CPU/MPS minimal (src/torch_model.CustomMixerModel expects `args:` matching Mamba2Config)
+model:
+  args:
+    d_model: 256
+    n_layer: 4
+    d_state: 128
+    d_conv: 4
+    expand: 2
+    headdim: 64
+    chunk_size: 64
+    vocab_size: 256          # matches MNISTSequenceDataModule N_CLASSES
+    pad_vocab_size_multiple: 16
+    embedding: false         # use linear encoder for scalar pixels
+
+# If running with CUDA (src/model.CustomMixerModel), comment the block above and use this:
+# model:
+#   embedding: false
+#   d_model: 256
+#   n_layer: 6
+#   d_intermediate: 512
+#   vocab_size: 256
+#   ssm_cfg: {}
+#   attn_layer_idx: null
+#   attn_cfg: null
+#   norm_epsilon: 1e-5
+#   rms_norm: false
+#   initializer_cfg: {}
+#   fused_add_norm: false
+#   residual_in_fp32: false
+#   device: null
+#   dtype: null
