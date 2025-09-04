@@ -5,20 +5,24 @@ import torch.nn as nn
 from mamba_ssm.models.mixer_seq_simple import _init_weights, create_block
 from mamba_ssm.utils.generation import GenerationMixin
 
+from src.inference import CustomGenerationMixin
+
 try:
     from mamba_ssm.ops.triton.layer_norm import RMSNorm, layer_norm_fn, rms_norm_fn
 except ImportError:
     RMSNorm, layer_norm_fn, rms_norm_fn = None, None, None
 
 
-class CustomMixerModel(nn.Module, GenerationMixin):
+class CustomMixerModel(nn.Module, CustomGenerationMixin):
     def __init__(
         self,
-        embedding: bool,
+        input_type: str,
+        output_type: str,
         d_model: int,
         n_layer: int,
         d_intermediate: int,
-        vocab_size: int,
+        vocab_size: int | None = None,
+        out_value_size: int | None = None,
         ssm_cfg=None,
         attn_layer_idx=None,
         attn_cfg=None,
@@ -33,9 +37,16 @@ class CustomMixerModel(nn.Module, GenerationMixin):
         factory_kwargs = {"device": device, "dtype": dtype}
         super().__init__()
         self.residual_in_fp32 = residual_in_fp32
-        self.use_embedding = embedding
+        self.input_type = input_type
+        self.output_type = output_type
 
-        if embedding:
+        # sanity check on args compatibility to input_type and output_type
+        if self.input_type == "token" or self.output_type == "logits":
+            assert vocab_size is not None
+        if self.output_type == "values":
+            assert out_value_size is not None
+
+        if self.input_type == "token":
             self.encoder = nn.Embedding(vocab_size, d_model, **factory_kwargs)
         else:
             self.encoder = nn.Linear(1, d_model, **factory_kwargs)
@@ -72,7 +83,10 @@ class CustomMixerModel(nn.Module, GenerationMixin):
         self.norm_f = (nn.LayerNorm if not rms_norm else RMSNorm)(
             d_model, eps=norm_epsilon, **factory_kwargs
         )
-        self.head = nn.Linear(d_model, vocab_size, **factory_kwargs)
+        if self.output_type == "logits":
+            self.head = nn.Linear(d_model, vocab_size, **factory_kwargs)
+        elif self.output_type == "values":
+            self.head = nn.Linear(d_model, out_value_size, **factory_kwargs)
 
         self.apply(
             partial(
@@ -117,10 +131,13 @@ class CustomMixerModel(nn.Module, GenerationMixin):
             )
         if num_last_tokens > 0:
             hidden_states = hidden_states[:, -num_last_tokens:]
-        logits = self.head(hidden_states)
-        CausalLMOutput = namedtuple("CausalLMOutput", ["logits"])
-        return CausalLMOutput(logits=logits)
+        outputs = self.head(hidden_states)
+        if self.output_type == "logits":
+            CausalOutput = namedtuple("CausalOutput", ["logits"])
+            return CausalOutput(logits=outputs)
+        elif self.output_type == "values":
+            CausalOutput = namedtuple("CausalOutput", ["values"])
+            return CausalOutput(values=outputs)
 
-    def prefix_sample(self, inputs, max_length=784, **kwargs):
-        inputs = inputs.squeeze(-1)  # GenerationMixin expects (batch, seq_len), just token idxs dd
-        return self.generate(input_ids=inputs, max_length=max_length + 1, top_k=50, **kwargs)
+    def prefix_sample(self, inputs, max_length=785, **kwargs):
+        return self.generate(input_ids=inputs, max_length=max_length, top_k=50, **kwargs)

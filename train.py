@@ -11,7 +11,7 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import OneCycleLR
 
 import src.callbacks
-from src.data import get_data_module
+from src.data import get_data_module_class, get_output2input_preprocess_fn
 
 
 class SequenceLightningModule(pl.LightningModule):
@@ -32,6 +32,9 @@ class SequenceLightningModule(pl.LightningModule):
             self.model = CustomMixerModel(
                 args=args, device="cuda" if config.trainer.accelerator == "gpu" else "cpu"
             )
+        self.output2input_preprocess_fn = get_output2input_preprocess_fn(
+            self.hparams.output2input_preprocess_fn_name
+        )
 
     def loss(self, pred, y, **w):
         if self.hparams["loss"] == "cross_entropy":
@@ -48,20 +51,11 @@ class SequenceLightningModule(pl.LightningModule):
 
     def forward(self, batch):
         """Passes a batch through the encoder, backbone, and decoder"""
-        if self.hparams["task_type"] == "generation":
-            x, *_ = batch
-            y = x.clone()
-            x = torch.cat(
-                [torch.zeros(x.shape[0], 1, *x.shape[2:]).to(x.device), x[:, :-1, :]], dim=1
-            )  # we move x back by one step and do a teacher-forced feedforward
+        x, y = batch
 
-        elif self.hparams["task_type"] == "classification":
-            x, y = batch
-            assert y.shape == (x.shape[0],)
-
-        if self.hparams["input_type"] == "raw":
+        if self.hparams.model.args.input_type == "raw":
             assert len(x.shape) == 3  # B,T,C
-        elif self.hparams["input_type"] == "tokenized":
+        elif self.hparams.model.args.input_type == "token":
             assert len(x.shape) == 2  # B,T
 
         pred = self.model.forward(x)
@@ -76,10 +70,10 @@ class SequenceLightningModule(pl.LightningModule):
         # Note that this currently runs into a bug in the progress bar with ddp (as of 1.4.6)
         # https://github.com/PyTorchLightning/pytorch-lightning/pull/9142
         # We additionally log the epochs under 'trainer' to get a consistent prefix with 'global_step'
-        record_step = {"trainer/loss": loss}
+        record_step = {"trainer_loss": loss}
         if self.hparams["task_type"] == "classification":
             pred_class = pred.logits.argmax(dim=-1)
-            record_step["trainer/acc"] = (pred_class == y).float().mean()
+            record_step["trainer_acc"] = (pred_class == y).float().mean()
 
         self.log_dict(
             record_step,
@@ -96,11 +90,11 @@ class SequenceLightningModule(pl.LightningModule):
     def validation_step(self, batch, batch_idx, dataloader_idx=0):
         x, y, pred = self.forward(batch)
         loss = self.loss(pred, y)
-        record = {"validation/loss": loss}
+        record = {"validation_loss": loss}
 
         if self.hparams["task_type"] == "classification":
             pred_class = pred.logits.argmax(dim=-1)
-            record["validation/acc"] = (pred_class == y).float().mean()
+            record["validation_acc"] = (pred_class == y).float().mean()
 
         self.log_dict(
             record,
@@ -120,7 +114,7 @@ class SequenceLightningModule(pl.LightningModule):
 
         if self.hparams["task_type"] == "classification":
             pred_class = pred.logits.argmax(dim=-1)
-            record["test/acc"] = (pred_class == y).float().mean()
+            record["test_acc"] = (pred_class == y).float().mean()
 
         self.log_dict(
             record,
@@ -196,9 +190,9 @@ def create_trainer(config):
         callbacks.append(
             ModelCheckpoint(
                 dirpath=config.train.ckpt_dir,  # <--- where to save
-                filename="epoch-{epoch:02d}-val_loss-{validation/loss:.2f}",
+                filename="epoch-{epoch:02d}-val_loss-{validation_loss:.2f}",
                 save_top_k=3,  # how many best models to keep
-                monitor="validation/loss",  # metric to monitor
+                monitor="validation_loss",  # metric to monitor
                 mode="min",  # minimize or maximize the metric
             )
         )
@@ -239,26 +233,17 @@ def train(config):
     if config.train.seed is not None:
         pl.seed_everything(config.train.seed, workers=True)
     trainer = create_trainer(config)
-    model = SequenceLightningModule(config)
-    summary = summarize(model, max_depth=2)
+    wrapper_model = SequenceLightningModule(config)
+    summary = summarize(wrapper_model, max_depth=2)
     print(summary)
     print(f"Total parameters: {summary.total_parameters}")
     print(f"Trainable parameters: {summary.trainable_parameters}")
 
-    data_module = get_data_module(config.dataset)
-
-    # sanity checks on task_type, loss, input_type, output_type compatibility
+    data_module_class = get_data_module_class(config.dataset.pop("name"))
+    data_module = data_module_class(**config.dataset)
     assert (
-        config.task_type in data_module.supported_tasks
+        config.task_type == data_module_class.SUPPORTED_TASK_TYPE
     ), f"Task type {config.task_type} not supported for dataset {config.dataset}"
-    if config.task_type == "classification":
-        assert config.loss == "cross_entropy"
-    elif config.task_type == "generation":
-        assert config.loss in ["mse", "cross_entropy"]
-    if config.loss == "cross_entropy":
-        assert config.model.output_type == "logits"
-    elif config.loss == "mse":
-        assert config.model.output_type == "values"
 
     # Load pretrained_model if specified, UNTESTED
     if config.train.get("pretrained_model_path", None) is not None:
@@ -272,34 +257,61 @@ def train(config):
 
         if config.train.get("ignore_pretrained_layers", False):
             pretrained_dict = pretrained_model.state_dict()
-            model_dict = model.state_dict()
+            model_dict = wrapper_model.state_dict()
             for k, v in model_dict.items():
                 for ignore_layer in config.train.ignore_pretrained_layers:
                     if ignore_layer in k:
                         pretrained_dict[k] = v
-            model.load_state_dict(pretrained_dict)
+            wrapper_model.load_state_dict(pretrained_dict)
         if config.train.get("pretrained_freeze_encoder", False):
-            for name, param in model.named_parameters():
+            for name, param in wrapper_model.named_parameters():
                 if not ("decoder" in name):
                     param.requires_grad = False
 
     # Run initial validation epoch (useful for debugging, finetuning)
     if config.train.validate_at_start:
         print("Running validation before training")
-        trainer.validate(model, datamodule=data_module)
+        trainer.validate(wrapper_model, datamodule=data_module)
 
     if config.train.ckpt is not None:
-        trainer.fit(model, ckpt_path=config.train.ckpt, datamodule=data_module)
+        trainer.fit(wrapper_model, ckpt_path=config.train.ckpt, datamodule=data_module)
     else:
-        trainer.fit(model, datamodule=data_module)
+        trainer.fit(wrapper_model, datamodule=data_module)
     if config.train.test:
-        trainer.test(model, datamodule=data_module)
+        trainer.test(wrapper_model, datamodule=data_module)
 
 
 @hydra.main(config_path="configs", config_name="config.yaml")
 def main(cfg: DictConfig) -> None:
     print(OmegaConf.to_yaml(cfg))
     OmegaConf.set_struct(cfg, False)  # Allow writing keys
+
+    # sanity checks on task_type, loss, data config compatibility
+    if cfg.task_type == "classification":
+        assert cfg.loss == "cross_entropy"
+    elif cfg.task_type == "generation":
+        assert cfg.loss in ["mse", "cross_entropy"]
+
+    # sanity check on loss, output_type, target_type compatibility
+    if cfg.loss == "cross_entropy":
+        assert cfg.model.args.output_type == "logits"
+        assert cfg.dataset.target_type == "token"
+    elif cfg.loss == "mse":
+        assert cfg.model.args.output_type == "values"
+        assert cfg.dataset.target_type == "raw"
+
+    # check model input/output types and dataset input/target types are compatible
+    assert cfg.model.args.input_type == cfg.dataset.input_type
+    if cfg.model.args.output_type == "logits":
+        assert cfg.dataset.target_type == "token"
+    elif cfg.model.args.output_type == "values":
+        assert cfg.dataset.target_type == "raw"
+
+    # check preprocessing exists if output and input types are incompatible
+    if (cfg.model.args.output_type == "logits" and cfg.model.args.input_type == "raw") or (
+        cfg.model.args.output_type == "values" and cfg.model.args.input_type == "token"
+    ):
+        assert cfg.output2input_preprocess_fn_name is not None
 
     # Track with wandb
     wandb_cfg = cfg["wandb"]

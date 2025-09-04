@@ -6,17 +6,17 @@ train:
   ckpt: null
   ckpt_dir: ~/ckpt
 
-# Data config (MNIST sequence task)
 dataset:
-  dataset: mnist
+  name: mnist_generation
   bsz: 128
   num_workers: 0
   data_dir: ~/data
+  input_type: raw
+  target_type: token
 
 # Small model for speed (used by CPU class after the code tweak below)
 model:
   args:
-    embedding: false
     n_layer: 4
     d_model: 64
     d_intermediate: 0
@@ -32,17 +32,19 @@ model:
     rms_norm: true
     fused_add_norm: true
     residual_in_fp32: true
+    input_type: raw
+    output_type: logits
 
 # Optimizer
 lr: 0.001
-weight_decay: 0.01
+weight_decay: 0.0
 lr_schedule: true
 pct_start: 0.1
 total_steps: null
-num_samples_while_training: 4
-sample_prefix_length: 256
 task_type: generation
+loss: cross_entropy
 use_fused_kernel: true
+output2input_preprocess_fn_name: mnist_token2raw
 
 # Lightning Trainer
 trainer:
@@ -60,4 +62,9 @@ trainer:
 wandb:
   project: mamba2-mnist
   name: model
-callbacks: {}
+callbacks:
+  ImagePrefixSamplerCallback:
+    num_samples: 8
+    every_n_epochs: 1
+    sample_prefix_length: 257
+    max_length: 785
