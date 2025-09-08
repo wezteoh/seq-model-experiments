@@ -106,8 +106,6 @@ class CustomMixerModel(nn.Module, CustomGenerationMixin):
     def forward(
         self, inputs, position_ids=None, inference_params=None, num_last_tokens=0, **mixer_kwargs
     ):
-        if len(inputs.shape) == 2 and not self.use_embedding:
-            inputs = inputs.unsqueeze(-1).float()
         hidden_states = self.encoder(inputs)
         residual = None
         for layer in self.layers:

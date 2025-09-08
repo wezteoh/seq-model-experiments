@@ -6,10 +6,12 @@ train:
   ckpt: null
 
 dataset:
-  dataset: mnist
+  name: mnist_generation
   bsz: 8
   num_workers: 0
   data_dir: ~/projects/data
+  input_type: raw
+  target_type: token
 
 # Small model for speed (used by CPU class after the code tweak below)
 model:
@@ -23,7 +25,8 @@ model:
     chunk_size: 16
     vocab_size: 256
     pad_vocab_size_multiple: 16
-    embedding: false
+    input_type: raw
+    output_type: logits
 
 # Optimizer
 lr: 0.001
@@ -31,10 +34,10 @@ weight_decay: 0.0
 lr_schedule: true
 pct_start: 0.1
 total_steps: null
-num_samples_while_training: 4
-sample_prefix_length: 256
 task_type: generation
+loss: cross_entropy
 use_fused_kernel: false
+output2input_preprocess_fn_name: mnist_token2raw
 
 # Lightning Trainer
 trainer:
@@ -52,4 +55,9 @@ trainer:
 wandb:
   project: mamba2-mnist
   name: dryrun
-callbacks: {}
+callbacks: 
+  ImagePrefixSamplerCallback:
+    num_samples: 8
+    every_n_epochs: 1
+    sample_prefix_length: 257
+    max_length: 785

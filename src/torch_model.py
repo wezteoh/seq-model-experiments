@@ -4,7 +4,7 @@ adapted from mamba2-minimal https://github.com/tommyip/mamba2-minimal
 
 from collections import namedtuple
 from dataclasses import dataclass
-from typing import Iterable, NamedTuple, TypeAlias, cast
+from typing import Callable, Iterable, Literal, NamedTuple, TypeAlias, cast
 
 import torch
 import torch.nn.functional as F
@@ -16,7 +16,6 @@ Device: TypeAlias = str | torch.device | None
 
 @dataclass
 class Mamba2Config:
-    embedding: bool = False
     d_model: int = 128  # model dimension (D)
     n_layer: int = 24  # number of Mamba-2 layers in the language model
     d_state: int = 128  # state dimension (N)
@@ -25,7 +24,10 @@ class Mamba2Config:
     headdim: int = 64  # head dimension (P)
     chunk_size: int = 64  # matrix partition size (Q)
     vocab_size: int = 50277
+    out_value_size: int = 1
     pad_vocab_size_multiple: int = 16
+    input_type: Literal["token", "raw"] = "token"
+    output_type: Literal["logits", "values"] = "logits"
 
     def __post_init__(self):
         self.d_inner = self.expand * self.d_model
@@ -59,7 +61,7 @@ class CustomMixerModel(nn.Module):
             dict(
                 encoder=(
                     nn.Embedding(args.vocab_size, args.d_model, device=device)
-                    if args.embedding
+                    if args.input_type == "token"
                     else nn.Linear(1, args.d_model, device=device)
                 ),
                 layers=nn.ModuleList(
@@ -76,7 +78,11 @@ class CustomMixerModel(nn.Module):
                 norm_f=RMSNorm(args.d_model, device=device),
             )
         )
-        self.lm_head = nn.Linear(args.d_model, args.vocab_size, device=device)
+        self.lm_head = (
+            nn.Linear(args.d_model, args.vocab_size, device=device)
+            if args.output_type == "logits"
+            else nn.Linear(args.d_model, args.out_value_size, device=device)
+        )
 
     def forward(
         self,
@@ -101,8 +107,6 @@ class CustomMixerModel(nn.Module):
         if h is None:
             h = [None for _ in range(self.args.n_layer)]
 
-        if not self.args.embedding:
-            input_ids = input_ids.float()
         x_BTC = self.backbone.encoder(input_ids)
         for i, layer in enumerate(self.backbone.layers):
             y_BTC, h[i] = layer.mixer(layer.norm(x_BTC), h[i])
@@ -120,16 +124,28 @@ class CustomMixerModel(nn.Module):
         CausalLMOutput = namedtuple("CausalLMOutput", ["logits", "hidden_states"])
         return CausalLMOutput(logits=logits_BTC, hidden_states=cast(list[InferenceCache], h))
 
-    def prefix_sample(self, input_ids: LongTensor, max_length: int = 784, **kwargs):
+    def prefix_sample(self, input_ids: LongTensor, max_length: int, **kwargs):
         outputs = []
         for input_ids_instance in input_ids:
             output = self.generate(
-                input_ids_instance, max_length - input_ids_instance.shape[0] + 1, eos_token_id=257
+                input_ids_instance,
+                max_length - input_ids_instance.shape[0],
+                eos_token_id=257,
+                **kwargs
             )
             outputs.append(output.unsqueeze(0))
         return torch.cat(outputs, dim=0).squeeze(-1)
 
-    def generate(
+    def generate(self, *args, **kwargs):
+        if self.args.output_type == "logits":
+            return self.token_generate(*args, **kwargs)
+        elif self.args.output_type == "values":
+            return self.raw_generate(*args, **kwargs)
+
+    def raw_generate(self, *args, **kwargs):
+        raise NotImplementedError
+
+    def token_generate(
         self,
         input_ids: LongTensor,
         max_new_length: int = 20,
@@ -137,11 +153,16 @@ class CustomMixerModel(nn.Module):
         top_k: int = 50,
         top_p: float = 1.0,
         eos_token_id: int = 0,
+        output2input_preprocess_fn: Callable[[Tensor], Tensor] = None,
     ) -> Iterable[tuple[int, list[InferenceCache]]]:
 
         output = input_ids
 
-        prefix, tokens = input_ids[:-1], input_ids[-1:].unsqueeze(0)
+        prefix, head = input_ids[:-1], input_ids[-1:].unsqueeze(0)
+
+        if output2input_preprocess_fn is not None:
+            prefix = output2input_preprocess_fn(prefix)
+            head = output2input_preprocess_fn(head)
 
         # Process prompt
         # The input sequence to forward (non-inference path) must have length multiple that of chunk_size.
@@ -161,7 +182,7 @@ class CustomMixerModel(nn.Module):
         # Generate
         for _ in range(max_new_length):
             with torch.no_grad():
-                out = self(tokens, h, inference=True).logits
+                out = self(head, h, inference=True).logits
             logits = out[0, -1]
             if temperature != 1.0:
                 logits = logits / temperature
@@ -180,8 +201,10 @@ class CustomMixerModel(nn.Module):
             next_token = torch.multinomial(probs, num_samples=1)
             if next_token.item() == eos_token_id:
                 return
-            output = torch.cat([output, next_token.unsqueeze(0)], dim=0)
-            tokens = next_token.view(1, 1, -1)
+            output = torch.cat([output, next_token], dim=0)
+            head = next_token.view(1, 1)
+            if output2input_preprocess_fn is not None:
+                head = output2input_preprocess_fn(head)
         return output
 
 

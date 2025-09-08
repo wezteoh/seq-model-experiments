@@ -8,43 +8,43 @@ train:
 
 dataset:
   name: mnist_generation
-  bsz: 128
+  bsz: 50
   num_workers: 0
   data_dir: ~/data
-  input_type: raw
+  input_type: token
   target_type: token
 
 # Small model for speed (used by CPU class after the code tweak below)
 model:
   args:
-    n_layer: 4
-    d_model: 64
+    n_layer: 6
+    d_model: 512
     d_intermediate: 0
     vocab_size: 256
     ssm_cfg:
       layer: Mamba2
-      d_state: 128
+      d_state: 256
       d_conv: 4
-      expand: 4
-      headdim: 16
+      expand: 1
+      headdim: 64
       ngroups: 1
       chunk_size: 128
     rms_norm: true
     fused_add_norm: true
     residual_in_fp32: true
-    input_type: raw
+    input_type: token
     output_type: logits
 
 # Optimizer
-lr: 0.001
-weight_decay: 0.0
+lr: 0.005
+weight_decay: 0.05
 lr_schedule: true
 pct_start: 0.1
 total_steps: null
 task_type: generation
 loss: cross_entropy
 use_fused_kernel: true
-output2input_preprocess_fn_name: mnist_token2raw
+output2input_preprocess_fn_name: null
 
 # Lightning Trainer
 trainer:
@@ -61,7 +61,7 @@ trainer:
 
 wandb:
   project: mamba2-mnist
-  name: model-fused-small
+  name: model-5m-fused
 callbacks:
   ImagePrefixSamplerCallback:
     num_samples: 8

@@ -18,17 +18,19 @@ dataset:
 model:
   args:
     n_layer: 4
-    d_model: 64
+    d_model: 128
     d_intermediate: 0
     vocab_size: 256
     ssm_cfg:
       layer: Mamba2
       d_state: 128
       d_conv: 4
-      expand: 4
-      headdim: 16
+      expand: 1
+      headdim: 32
       ngroups: 1
       chunk_size: 128
+      bias: false
+      conv_bias: false
     rms_norm: true
     fused_add_norm: true
     residual_in_fp32: true
