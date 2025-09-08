@@ -52,8 +52,8 @@ trainer:
   accelerator: cpu
   devices: 1
   precision: 32
-  max_epochs: 1
-  fast_dev_run: true           # one batch train/val/test and exit
+  max_epochs: 3
+  fast_dev_run: false           # one batch train/val/test and exit
   limit_train_batches: 2       # safety; only a couple batches
   limit_val_batches: 1
   limit_test_batches: 0

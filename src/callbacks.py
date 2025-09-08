@@ -55,6 +55,9 @@ class InductionHeadTextSamplerCallback(pl.Callback):
         self.induction_length = induction_length
 
     def on_validation_epoch_end(self, trainer, pl_module):
+        at = wandb.Artifact(f"samples_epoch_{trainer.current_epoch}", type="samples")
+        table = wandb.Table(columns=["epoch", "sample"])
+
         epoch = trainer.current_epoch
         if epoch % self.every_n_epochs != 0 or trainer.state.fn != "fit":
             return  # only run every N epochs
@@ -63,7 +66,6 @@ class InductionHeadTextSamplerCallback(pl.Callback):
         batch = next(iter(sample_loader))
         x = batch[0][: self.num_samples]
 
-        table = wandb.Table(columns=["epoch", "sample"])
         samples = pl_module.model.generate(
             x, max_length=x.shape[1] + self.induction_length, top_k=1, eos_token_id=-1
         )
@@ -71,7 +73,8 @@ class InductionHeadTextSamplerCallback(pl.Callback):
         samples = [trainer.datamodule.tokenizer.decode(sample) for sample in samples]
         for sample in samples:
             table.add_data(epoch, sample)
-        trainer.logger.experiment.log({"samples": table})
+        at.add(table, "samples")
+        wandb.log_artifact(at)
 
         if pl_module.training:  # restore training mode
             pl_module.train()

@@ -73,13 +73,13 @@ class SequenceLightningModule(pl.LightningModule):
         record_step = {}
         for metric in self.hparams.metrics:
             if metric == "loss":
-                record_step[f"trainer_{metric}"] = loss
-            elif metric == "accuracy":
-                # exclude ignore_index from accuracy calculation
-                pred_class = pred.logits.argmax(dim=-1)
-                record_step[f"trainer_{metric}"] = (
-                    (pred_class[y != -100] == y[y != -100]).float().mean()
-                )
+                record_step[f"trainer_{metric}"] = loss.item()
+            # elif metric == "accuracy":
+            #     # exclude ignore_index from accuracy calculation
+            #     pred_class = pred.logits.argmax(dim=-1)
+            #     record_step[f"trainer_{metric}"] = (
+            #         (pred_class[y != -100] == y[y != -100]).float().mean().item()
+            #     )
 
         self.log_dict(
             record_step,
@@ -100,10 +100,10 @@ class SequenceLightningModule(pl.LightningModule):
         record = {}
         for metric in self.hparams.metrics:
             if metric == "loss":
-                record[f"validation_{metric}"] = loss
+                record[f"validation_{metric}"] = loss.item()
             elif metric == "accuracy":
                 pred_class = pred.logits.argmax(dim=-1)
-                record[f"validation_{metric}"] = (pred_class == y).float().mean()
+                record[f"validation_{metric}"] = (pred_class == y).float().mean().item()
 
         self.log_dict(
             record,
