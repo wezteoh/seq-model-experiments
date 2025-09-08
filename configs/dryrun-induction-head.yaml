@@ -1,0 +1,70 @@
+# Minimal, fast debug run on CPU
+train:
+  seed: 0
+  validate_at_start: true
+  test: false
+  ckpt: null
+
+dataset:
+  name: icl
+  bsz: 8
+  num_workers: 0
+  data_dir: /Users/wzteoh/projects/data
+  input_type: token
+  target_type: token
+  num_examples: 5000
+  num_test_examples: 500
+  vocab_size: 20
+  input_seq_len: 30
+  induction_len: 1
+  induction_num_triggers: 1
+
+# Small model for speed (used by CPU class after the code tweak below)
+model:
+  args:
+    d_model: 64
+    n_layer: 1
+    d_state: 64
+    d_conv: 4
+    expand: 2
+    headdim: 32
+    chunk_size: 31
+    vocab_size: 20
+    pad_vocab_size_multiple: 1
+    input_type: token
+    output_type: logits
+
+metrics: ["loss", "accuracy"]
+
+# Optimizer
+lr: 0.001
+weight_decay: 0.0
+lr_schedule: true
+pct_start: 0.1
+total_steps: null
+task_type: generation
+loss: cross_entropy
+use_fused_kernel: false
+output2input_preprocess_fn_name: null
+
+# Lightning Trainer
+trainer:
+  accelerator: cpu
+  devices: 1
+  precision: 32
+  max_epochs: 1
+  fast_dev_run: true           # one batch train/val/test and exit
+  limit_train_batches: 2       # safety; only a couple batches
+  limit_val_batches: 1
+  limit_test_batches: 0
+  log_every_n_steps: 1
+  enable_checkpointing: false
+
+wandb:
+  project: mamba2-induction-head
+  name: dryrun
+callbacks: 
+  InductionHeadTextSamplerCallback:
+    num_samples: 8
+    every_n_epochs: 1
+    induction_length: 1

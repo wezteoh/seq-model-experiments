@@ -41,7 +41,7 @@ class SequenceLightningModule(pl.LightningModule):
             output = pred.logits
             output = output.reshape(-1, output.shape[-1])
             y = y.reshape(-1).long()
-            loss = F.cross_entropy(output, y)
+            loss = F.cross_entropy(output, y, ignore_index=-100)
         elif self.hparams["loss"] == "mse":
             output = pred.values
             output = output.reshape(-1, output.shape[-1])
@@ -70,10 +70,16 @@ class SequenceLightningModule(pl.LightningModule):
         # Note that this currently runs into a bug in the progress bar with ddp (as of 1.4.6)
         # https://github.com/PyTorchLightning/pytorch-lightning/pull/9142
         # We additionally log the epochs under 'trainer' to get a consistent prefix with 'global_step'
-        record_step = {"trainer_loss": loss}
-        if self.hparams["task_type"] == "classification":
-            pred_class = pred.logits.argmax(dim=-1)
-            record_step["trainer_acc"] = (pred_class == y).float().mean()
+        record_step = {}
+        for metric in self.hparams.metrics:
+            if metric == "loss":
+                record_step[f"trainer_{metric}"] = loss
+            elif metric == "accuracy":
+                # exclude ignore_index from accuracy calculation
+                pred_class = pred.logits.argmax(dim=-1)
+                record_step[f"trainer_{metric}"] = (
+                    (pred_class[y != -100] == y[y != -100]).float().mean()
+                )
 
         self.log_dict(
             record_step,
@@ -90,11 +96,14 @@ class SequenceLightningModule(pl.LightningModule):
     def validation_step(self, batch, batch_idx, dataloader_idx=0):
         x, y, pred = self.forward(batch)
         loss = self.loss(pred, y)
-        record = {"validation_loss": loss}
 
-        if self.hparams["task_type"] == "classification":
-            pred_class = pred.logits.argmax(dim=-1)
-            record["validation_acc"] = (pred_class == y).float().mean()
+        record = {}
+        for metric in self.hparams.metrics:
+            if metric == "loss":
+                record[f"validation_{metric}"] = loss
+            elif metric == "accuracy":
+                pred_class = pred.logits.argmax(dim=-1)
+                record[f"validation_{metric}"] = (pred_class == y).float().mean()
 
         self.log_dict(
             record,

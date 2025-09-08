@@ -125,22 +125,19 @@ class CustomMixerModel(nn.Module):
         return CausalLMOutput(logits=logits_BTC, hidden_states=cast(list[InferenceCache], h))
 
     def prefix_sample(self, input_ids: LongTensor, max_length: int, **kwargs):
-        outputs = []
-        for input_ids_instance in input_ids:
-            output = self.generate(
-                input_ids_instance,
-                max_length - input_ids_instance.shape[0],
-                eos_token_id=257,
-                **kwargs
-            )
-            outputs.append(output.unsqueeze(0))
-        return torch.cat(outputs, dim=0).squeeze(-1)
+        return self.generate(input_ids, max_length, **kwargs)
 
-    def generate(self, *args, **kwargs):
+    def generate(self, input_ids: LongTensor, max_length: int, **kwargs):
+        outputs = []
         if self.args.output_type == "logits":
-            return self.token_generate(*args, **kwargs)
+            for i in range(input_ids.shape[0]):
+                output = self.token_generate(input_ids[i], max_length, **kwargs)
+                outputs.append(output.unsqueeze(0))
         elif self.args.output_type == "values":
-            return self.raw_generate(*args, **kwargs)
+            for i in range(input_ids.shape[0]):
+                output = self.raw_generate(input_ids[i], max_length, **kwargs)
+                outputs.append(output.unsqueeze(0))
+        return torch.cat(outputs, dim=0).squeeze(-1)
 
     def raw_generate(self, *args, **kwargs):
         raise NotImplementedError
@@ -148,7 +145,7 @@ class CustomMixerModel(nn.Module):
     def token_generate(
         self,
         input_ids: LongTensor,
-        max_new_length: int = 20,
+        max_length: int = 20,
         temperature: float = 1.0,
         top_k: int = 50,
         top_p: float = 1.0,
@@ -156,6 +153,7 @@ class CustomMixerModel(nn.Module):
         output2input_preprocess_fn: Callable[[Tensor], Tensor] = None,
     ) -> Iterable[tuple[int, list[InferenceCache]]]:
 
+        max_new_length = max_length - input_ids.shape[0]
         output = input_ids
 
         prefix, head = input_ids[:-1], input_ids[-1:].unsqueeze(0)

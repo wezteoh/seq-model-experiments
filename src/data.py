@@ -1,8 +1,15 @@
+import os
+from typing import Literal
+
+import numpy as np
 import pytorch_lightning as pl
 import torch
 import torchvision
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Dataset, TensorDataset
 from torchvision import transforms
+from tqdm import tqdm
+
+from src.data_utils import Tokenizer, Vocab, generate_induction_head
 
 
 def get_output2input_preprocess_fn(preprocess_fn_name):
@@ -16,6 +23,8 @@ def get_output2input_preprocess_fn(preprocess_fn_name):
 def get_data_module_class(dataset_name):
     if dataset_name == "mnist_generation":
         return MNISTSequenceGenerationDataModule
+    if dataset_name in ("icl"):
+        return ICLDataModule
     raise ValueError(f"Dataset {dataset_name} not supported")
 
 
@@ -23,8 +32,6 @@ class MNISTSequenceGenerationDataModule(pl.LightningDataModule):
 
     # class variables, to allow model to access outside of training
     SUPPORTED_TASK_TYPE = "generation"
-    SEQ_LENGTH = 784
-    NUM_CLASSES = 256
 
     @classmethod
     def token2raw(cls, x):
@@ -40,13 +47,14 @@ class MNISTSequenceGenerationDataModule(pl.LightningDataModule):
         super().__init__()
         self.bsz = bsz
         self.num_workers = num_workers
-        self.data_dir = data_dir
+        self.data_dir = os.path.expanduser(data_dir)
         self.input_type = input_type
         self.target_type = target_type
+        self.seq_length = 784
         # Define transforms once
         transform_list = [
             transforms.ToTensor(),
-            transforms.Lambda(lambda x: (x.view(self.__class__.SEQ_LENGTH).t() * 255).int()),
+            transforms.Lambda(lambda x: (x.view(self.seq_length).t() * 255).int()),
         ]
         self.transform = transforms.Compose(transform_list)
 
@@ -103,7 +111,7 @@ class MNISTSequenceGenerationDataModule(pl.LightningDataModule):
             persistent_workers=self.num_workers > 0,
         )
 
-    def sample_dataloader(self):
+    def test_dataloader(self):
         return DataLoader(
             self.test_ds,
             batch_size=self.bsz,
@@ -113,12 +121,218 @@ class MNISTSequenceGenerationDataModule(pl.LightningDataModule):
             persistent_workers=self.num_workers > 0,
         )
 
-    def test_dataloader(self):
+
+"""Synthetic datasets to test in-context learning ability."""
+
+
+class ICLDataModule(pl.LightningDataModule):
+    _name_ = "icl"
+    SUPPORTED_TASK_TYPE = "generation"
+
+    def __init__(
+        self,
+        num_examples: int,
+        num_test_examples: int,
+        vocab_size: int,
+        input_seq_len: int,
+        number_duplicates_per_epoch: int = 0,
+        seed: int = 42,
+        batch_size: int = 32,
+        split_train_test: bool = False,
+        induction_len: int = 1,
+        induction_num_triggers: int = 1,
+        allow_dot: bool = False,
+        max_copy_len: int = 10,
+        test_seq_len: int = None,
+        num_keys: int = 1,  # number of keys for associative recall,
+        data_dir: str = None,
+        # Align interface with MNIST module
+        bsz: int = None,
+        num_workers: int = 4,
+        input_type: Literal["token"] = "token",
+        target_type: Literal["token"] = "token",
+        *args,
+        **kwargs,
+    ):
+        super().__init__()
+        self.num_examples = num_examples
+        self.num_test_examples = num_test_examples
+        self.input_seq_len = input_seq_len
+        self.vocab_size = vocab_size
+        self.copy_method = "induction_head"
+        self.number_duplicates_per_epoch = number_duplicates_per_epoch
+        self.seed = seed
+        self.batch_size = batch_size
+        # Map MNIST-like args
+        self.bsz = bsz if bsz is not None else batch_size
+        self.num_workers = num_workers
+        self.input_type = input_type
+        self.target_type = target_type
+        self.split_train_test = split_train_test  # let the same copy chars appear in train/test
+        self.induction_len = induction_len
+        self.induction_num_triggers = induction_num_triggers
+        self.allow_dot = allow_dot
+        self.max_copy_len = max_copy_len
+        self.data_dir = os.path.expanduser(data_dir)
+
+        if test_seq_len is not None:
+            self.test_seq_len = test_seq_len
+        else:
+            self.test_seq_len = input_seq_len
+        self.num_keys = num_keys
+
+        special_vocabs = {"copy_prefix": "=>", "noop": "."}
+        self.special_vocabs = special_vocabs
+        self.vocab = Vocab(vocab_size - len(special_vocabs), special_vocabs=special_vocabs)
+        self.tokenizer = Tokenizer(self.vocab)
+
+        self.num_extra_seq_len = 2
+
+        if self.copy_method == "induction_head":
+            self.copy_f = self.generate_induction_head
+            self.num_extra_seq_len = 1 + self.induction_len
+        else:
+            self.copy_f = None
+
+        if self.number_duplicates_per_epoch > 0:
+            self.duplicate_ex = self.generate_example()
+            self.duplicate_index = max(int(self.num_examples / self.number_duplicates_per_epoch), 1)
+        else:
+            self.duplicate_ex = None
+            self.duplicate_index = -1
+
+        self.total_seq_len = self.input_seq_len + self.num_extra_seq_len
+
+    def prepare_data(self):
+        # Nothing to download; datasets are generated in setup
+        pass
+
+    def generate_induction_head(self, seqlen=None, valid_chars=None):
+        return generate_induction_head(
+            self.vocab,
+            seqlen if seqlen is not None else self.input_seq_len,
+            self.special_vocabs["copy_prefix"],
+            self.induction_len,
+            self.induction_num_triggers,
+            self.rng,
+            valid_chars=valid_chars,
+        )
+
+    def generate_example(self, seqlen=None, valid_chars=None):
+        vocab_seq = self.copy_f(seqlen=seqlen, valid_chars=valid_chars)
+        return self.tokenizer.tokenize(vocab_seq, return_tensor=True)
+
+    def setup(self, stage=None):
+        train_tensor = test_tensor = None
+        if self.data_dir is not None:
+            try:
+                train_tensor = torch.load(
+                    os.path.join(
+                        self.data_dir,
+                        f"train_{self.copy_method}_{self.num_examples}_{self.vocab_size}_{self.input_seq_len}.pt",
+                    )
+                )
+                test_tensor = torch.load(
+                    os.path.join(
+                        self.data_dir,
+                        f"test_{self.copy_method}_{self.num_examples}_{self.vocab_size}_{self.input_seq_len}.pt",
+                    )
+                )
+            except Exception:
+                pass
+
+        if train_tensor is None or test_tensor is None:
+            if hasattr(self, "dataset"):
+                return
+            self.rng = np.random.default_rng(self.seed)
+
+            if self.split_train_test:
+                all_vocab = self.vocab.non_special_vocab
+                train_vocab = set(
+                    self.rng.choice(all_vocab, size=len(all_vocab) // 2, replace=False)
+                )
+                test_vocab = set(all_vocab) - train_vocab
+                train_vocab = list(train_vocab)
+                test_vocab = list(test_vocab)
+            else:
+                train_vocab = None
+                test_vocab = None
+
+            all_examples = []
+            for i, (example_count, valid_vocab) in enumerate(
+                zip([self.num_examples, self.num_test_examples], [train_vocab, test_vocab])
+            ):
+                examples = torch.stack(
+                    [
+                        self.generate_example(
+                            seqlen=self.input_seq_len if i == 0 else self.test_seq_len,
+                            valid_chars=valid_vocab,
+                        )["input_ids"]
+                        for _ in tqdm(range(example_count))
+                    ]
+                )
+                examples = torch.unique(examples, dim=0, sorted=False).tolist()
+
+                while len(examples) < example_count:
+                    new_example = self.generate_example(
+                        seqlen=self.input_seq_len if i == 0 else self.test_seq_len,
+                        valid_chars=valid_vocab,
+                    )["input_ids"].tolist()
+                    if new_example not in examples:
+                        examples.append(new_example)
+
+                self.rng.shuffle(examples)
+                all_examples.append(torch.LongTensor(examples))
+
+            # all_examples = torch.concat(all_examples)
+            train_tensor = torch.stack(
+                [torch.stack([example[:-1], example[1:]]) for example in all_examples[0]]
+            )
+            test_tensor = torch.stack(
+                [torch.stack([example[:-1], example[1:]]) for example in all_examples[1]]
+            )
+            test_tensor[:, 1, : -1 * (self.num_extra_seq_len - 1)] = -100
+            if self.copy_method in ["assoc_recall"]:
+                test_tensor[:, 1, :-1] = -100
+            if self.copy_method in ["majority", "fom1"]:
+                train_tensor[:, 1, : -1 * (self.num_extra_seq_len - 1)] = -100
+
+            if self.data_dir is not None:
+                torch.save(
+                    train_tensor,
+                    os.path.join(
+                        self.data_dir,
+                        f"train_{self.copy_method}_{self.num_examples}_{self.vocab_size}_{self.input_seq_len}.pt",
+                    ),
+                )
+                torch.save(
+                    test_tensor,
+                    os.path.join(
+                        self.data_dir,
+                        f"test_{self.copy_method}_{self.num_examples}_{self.vocab_size}_{self.input_seq_len}.pt",
+                    ),
+                )
+
+        self.dataset = {
+            "train": TensorDataset(train_tensor[:, 0, :], train_tensor[:, 1, :]),
+            "test": TensorDataset(test_tensor[:, 0, :], test_tensor[:, 1, :]),
+        }
+
+    def train_dataloader(self, *args, **kwargs):
+        return self._data_loader(self.dataset["train"], shuffle=True)
+
+    def val_dataloader(self, *args, **kwargs):
+        return self._data_loader(self.dataset["test"], shuffle=False)
+
+    def test_dataloader(self, *args, **kwargs):
+        return self._data_loader(self.dataset["test"], shuffle=False)
+
+    def _data_loader(self, dataset: Dataset, shuffle: bool = False) -> DataLoader:
         return DataLoader(
-            self.test_ds,
+            dataset,
             batch_size=self.bsz,
-            shuffle=False,
             num_workers=self.num_workers,
+            shuffle=shuffle,
             pin_memory=True,
             persistent_workers=self.num_workers > 0,
         )

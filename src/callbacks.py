@@ -45,3 +45,33 @@ class ImagePrefixSamplerCallback(pl.Callback):
 
         if pl_module.training:  # restore training mode
             pl_module.train()
+
+
+class InductionHeadTextSamplerCallback(pl.Callback):
+    def __init__(self, num_samples=16, every_n_epochs=1, induction_length=1):
+        super().__init__()
+        self.num_samples = num_samples
+        self.every_n_epochs = every_n_epochs
+        self.induction_length = induction_length
+
+    def on_validation_epoch_end(self, trainer, pl_module):
+        epoch = trainer.current_epoch
+        if epoch % self.every_n_epochs != 0 or trainer.state.fn != "fit":
+            return  # only run every N epochs
+
+        sample_loader = trainer.val_dataloaders
+        batch = next(iter(sample_loader))
+        x = batch[0][: self.num_samples]
+
+        table = wandb.Table(columns=["epoch", "sample"])
+        samples = pl_module.model.generate(
+            x, max_length=x.shape[1] + self.induction_length, top_k=1, eos_token_id=-1
+        )
+        samples = samples.cpu().numpy()
+        samples = [trainer.datamodule.tokenizer.decode(sample) for sample in samples]
+        for sample in samples:
+            table.add_data(epoch, sample)
+        trainer.logger.experiment.log({"samples": table})
+
+        if pl_module.training:  # restore training mode
+            pl_module.train()
