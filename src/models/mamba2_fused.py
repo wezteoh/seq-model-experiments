@@ -3,7 +3,6 @@ from functools import partial
 
 import torch.nn as nn
 from mamba_ssm.models.mixer_seq_simple import _init_weights, create_block
-from mamba_ssm.utils.generation import GenerationMixin
 
 from src.inference import CustomGenerationMixin
 
@@ -13,7 +12,7 @@ except ImportError:
     RMSNorm, layer_norm_fn, rms_norm_fn = None, None, None
 
 
-class CustomMixerModel(nn.Module, CustomGenerationMixin):
+class Mamba2MixerModel(nn.Module, CustomGenerationMixin):
     def __init__(
         self,
         input_type: str,
@@ -136,6 +135,3 @@ class CustomMixerModel(nn.Module, CustomGenerationMixin):
         elif self.output_type == "values":
             CausalOutput = namedtuple("CausalOutput", ["values"])
             return CausalOutput(values=outputs)
-
-    def prefix_sample(self, inputs, max_length=785, **kwargs):
-        return self.generate(input_ids=inputs, max_length=max_length, top_k=50, **kwargs)

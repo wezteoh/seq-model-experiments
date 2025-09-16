@@ -6,12 +6,20 @@ from src.utils import bw_to_rgb, unflatten_images
 
 
 class ImagePrefixSamplerCallback(pl.Callback):
-    def __init__(self, num_samples=16, every_n_epochs=1, sample_prefix_length=10, max_length=785):
+    def __init__(
+        self,
+        num_samples=16,
+        every_n_epochs=1,
+        sample_prefix_length=10,
+        max_length=785,
+        top_k=50,
+    ):
         super().__init__()
         self.num_samples = num_samples
         self.every_n_epochs = every_n_epochs
         self.sample_prefix_length = sample_prefix_length
         self.max_length = max_length
+        self.top_k = top_k
 
     def on_validation_epoch_end(self, trainer, pl_module):
         epoch = trainer.current_epoch
@@ -31,10 +39,12 @@ class ImagePrefixSamplerCallback(pl.Callback):
         # pad dummy start of sequence
         x = trainer.datamodule.pad_start_of_sequence(x)
         x = x[:, : self.sample_prefix_length].to(pl_module.device)
-        samples = pl_module.model.prefix_sample(
+        samples = pl_module.model.generate(
             x,
-            output2input_preprocess_fn=pl_module.output2input_preprocess_fn,
             max_length=self.max_length,
+            top_k=self.top_k,
+            eos_token_id=-1,
+            output2input_preprocess_fn=pl_module.output2input_preprocess_fn,
         )
         # trim dummy start of sequence
         samples = samples[:, 1:].cpu().numpy()

@@ -12,6 +12,7 @@ from torch.optim.lr_scheduler import OneCycleLR
 
 import src.callbacks
 from src.data import get_data_module_class, get_output2input_preprocess_fn
+from src.models import get_model
 
 
 class SequenceLightningModule(pl.LightningModule):
@@ -19,19 +20,11 @@ class SequenceLightningModule(pl.LightningModule):
         super().__init__()
         self.save_hyperparameters(config, logger=True)
 
-        if torch.cuda.is_available() and self.hparams.use_fused_kernel:
-            from src.model import CustomMixerModel
-
-            # GPU path (src.model.CustomMixerModel signature: flat kwargs)
-            self.model = CustomMixerModel(**self.hparams.model["args"]).to("cuda")
-        else:
-            # CPU path (src.torch_model.CustomMixerModel signature: args=Mamba2Config)
-            from src.torch_model import CustomMixerModel, Mamba2Config
-
-            args = Mamba2Config(**self.hparams.model["args"])
-            self.model = CustomMixerModel(
-                args=args, device="cuda" if config.trainer.accelerator == "gpu" else "cpu"
-            )
+        self.model = get_model(
+            name=self.hparams.model.name,
+            args=self.hparams.model.args,
+            device="cuda" if config.trainer.accelerator == "gpu" else "cpu",
+        )
         self.output2input_preprocess_fn = get_output2input_preprocess_fn(
             self.hparams.output2input_preprocess_fn_name
         )
@@ -137,17 +130,89 @@ class SequenceLightningModule(pl.LightningModule):
 
         return loss
 
-    def configure_optimizers(self):
+    # def configure_optimizers(self):
+    #     lr = self.hparams.lr
+    #     weight_decay = self.hparams.weight_decay
+
+    #     param_groups = [{"params": self.model.parameters(), "lr": lr, "weight_decay": weight_decay}]
+    #     optimizer = AdamW(param_groups)
+
+    #     # Scheduler to mimic optax.cosine_onecycle_schedule
+    #     # In PyTorch: OneCycleLR with annealing='cos' gives the cosine one-cycle shape.
+    #     if self.hparams.lr_schedule:
+    #         # Lightning can infer total steps: trainer.estimated_stepping_batches
+    #         total_steps = self.hparams.total_steps or getattr(
+    #             self.trainer, "estimated_stepping_batches", None
+    #         )
+    #         if total_steps is None:
+    #             raise ValueError(
+    #                 "total_steps not set. Pass total_steps=... to the module "
+    #                 "or let Lightning set trainer.estimated_stepping_batches by calling trainer.fit first."
+    #             )
+
+    #         # For OneCycleLR we must pass max_lr per param group.
+    #         # Use each group's current lr as its max_lr (the 'peak_value' from your optax code).
+    #         max_lrs = [g.get("lr", lr) for g in optimizer.param_groups]
+
+    #         scheduler = OneCycleLR(
+    #             optimizer,
+    #             max_lr=max_lrs,
+    #             total_steps=total_steps,
+    #             pct_start=self.hparams.pct_start,
+    #             anneal_strategy="cos",
+    #             cycle_momentum=False,
+    #         )
+    #         return {
+    #             "optimizer": optimizer,
+    #             "lr_scheduler": {
+    #                 "scheduler": scheduler,
+    #                 "interval": "step",  # OneCycleLR updates every step
+    #                 "frequency": 1,
+    #             },
+    #         }
+    #     else:
+    #         return optimizer
+
+    def configure_optimizers(
+        self,
+    ):
         lr = self.hparams.lr
         weight_decay = self.hparams.weight_decay
 
-        param_groups = [{"params": self.model.parameters(), "lr": lr, "weight_decay": weight_decay}]
-        optimizer = AdamW(param_groups)
+        # All parameters in the model
+        all_parameters = list(self.model.parameters())
 
-        # Scheduler to mimic optax.cosine_onecycle_schedule
-        # In PyTorch: OneCycleLR with annealing='cos' gives the cosine one-cycle shape.
+        # General parameters don't contain the special _optim key
+        params = [p for p in all_parameters if not hasattr(p, "_optim")]
+
+        # Create an optimizer with the general parameters
+        optimizer = AdamW(params, lr=lr, weight_decay=weight_decay)
+
+        # Add parameters with special hyperparameters
+        hps = [getattr(p, "_optim") for p in all_parameters if hasattr(p, "_optim")]
+        hps = [
+            dict(s) for s in sorted(list(dict.fromkeys(frozenset(hp.items()) for hp in hps)))
+        ]  # Unique dicts
+        for hp in hps:
+            params = [p for p in all_parameters if getattr(p, "_optim", None) == hp]
+            optimizer.add_param_group({"params": params, **hp})
+
+        # Print optimizer info
+        keys = sorted(set([k for hp in hps for k in hp.keys()]))
+        for i, g in enumerate(optimizer.param_groups):
+            group_hps = {k: g.get(k, None) for k in keys}
+            print(
+                " | ".join(
+                    [
+                        f"Optimizer group {i}",
+                        f"{len(g['params'])} tensors",
+                    ]
+                    + [f"{k} {v}" for k, v in group_hps.items()]
+                )
+            )
+        # Create a lr scheduler
+        # scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=patience, factor=0.2)
         if self.hparams.lr_schedule:
-            # Lightning can infer total steps: trainer.estimated_stepping_batches
             total_steps = self.hparams.total_steps or getattr(
                 self.trainer, "estimated_stepping_batches", None
             )
@@ -156,11 +221,7 @@ class SequenceLightningModule(pl.LightningModule):
                     "total_steps not set. Pass total_steps=... to the module "
                     "or let Lightning set trainer.estimated_stepping_batches by calling trainer.fit first."
                 )
-
-            # For OneCycleLR we must pass max_lr per param group.
-            # Use each group's current lr as its max_lr (the 'peak_value' from your optax code).
             max_lrs = [g.get("lr", lr) for g in optimizer.param_groups]
-
             scheduler = OneCycleLR(
                 optimizer,
                 max_lr=max_lrs,
@@ -177,6 +238,8 @@ class SequenceLightningModule(pl.LightningModule):
                     "frequency": 1,
                 },
             }
+        else:
+            return optimizer
 
 
 def create_trainer(config):
@@ -247,6 +310,9 @@ def train(config):
     print(summary)
     print(f"Total parameters: {summary.total_parameters}")
     print(f"Trainable parameters: {summary.trainable_parameters}")
+
+    for name, p in wrapper_model.model.named_parameters():
+        print(f"{name:55s} shape={tuple(p.shape)}  requires_grad={p.requires_grad}")
 
     data_module_class = get_data_module_class(config.dataset.pop("name"))
     data_module = data_module_class(**config.dataset)

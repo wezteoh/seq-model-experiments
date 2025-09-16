@@ -16,6 +16,7 @@ Device: TypeAlias = str | torch.device | None
 
 @dataclass
 class Mamba2Config:
+    d_input: int | None = 1  # input dimension (D)
     d_model: int = 128  # model dimension (D)
     n_layer: int = 24  # number of Mamba-2 layers in the language model
     d_state: int = 128  # state dimension (N)
@@ -51,7 +52,7 @@ class InferenceCache(NamedTuple):
         )
 
 
-class CustomMixerModel(nn.Module):
+class Mamba2MixerModel(nn.Module):
     def __init__(self, args: Mamba2Config, device: Device = None):
         super().__init__()
         self.args = args
@@ -62,7 +63,7 @@ class CustomMixerModel(nn.Module):
                 encoder=(
                     nn.Embedding(args.vocab_size, args.d_model, device=device)
                     if args.input_type == "token"
-                    else nn.Linear(1, args.d_model, device=device)
+                    else nn.Linear(args.d_input, args.d_model, device=device)
                 ),
                 layers=nn.ModuleList(
                     [
@@ -107,25 +108,24 @@ class CustomMixerModel(nn.Module):
         if h is None:
             h = [None for _ in range(self.args.n_layer)]
 
-        x_BTC = self.backbone.encoder(input_ids)
+        x = self.backbone.encoder(input_ids)
         for i, layer in enumerate(self.backbone.layers):
-            y_BTC, h[i] = layer.mixer(layer.norm(x_BTC), h[i])
-            x_BTC = y_BTC + x_BTC
+            y, h[i] = layer.mixer(layer.norm(x), h[i])
+            x = y + x
 
-        x_BTC = self.backbone.norm_f(x_BTC)
-        logits_BTC = self.lm_head(x_BTC)
-        logits_BTC = logits_BTC[:, :seqlen]
+        x = self.backbone.norm_f(x)
+        outputs = self.lm_head(x)
+        outputs = outputs[:, :seqlen]
 
         if not inference:
-            CausalLMOutput = namedtuple("CausalLMOutput", ["logits"])
-            causal_lm_output = CausalLMOutput(logits=logits_BTC)
+            CausalLMOutput = namedtuple("CausalLMOutput", [self.args.output_type])
+            causal_lm_output = CausalLMOutput(**{self.args.output_type: outputs})
             return causal_lm_output
 
-        CausalLMOutput = namedtuple("CausalLMOutput", ["logits", "hidden_states"])
-        return CausalLMOutput(logits=logits_BTC, hidden_states=cast(list[InferenceCache], h))
-
-    def prefix_sample(self, input_ids: LongTensor, max_length: int, **kwargs):
-        return self.generate(input_ids, max_length, **kwargs)
+        CausalLMOutput = namedtuple("CausalLMOutput", [self.args.output_type, "hidden_states"])
+        return CausalLMOutput(
+            **{self.args.output_type: outputs}, hidden_states=cast(list[InferenceCache], h)
+        )
 
     def generate(self, input_ids: LongTensor, max_length: int, **kwargs):
         outputs = []
@@ -180,8 +180,9 @@ class CustomMixerModel(nn.Module):
         # Generate
         for _ in range(max_new_length):
             with torch.no_grad():
-                out = self(head, h, inference=True).logits
-            logits = out[0, -1]
+                out = self(head, h, inference=True)
+            logits = out.logits[0, -1]
+            h = out.hidden_states
             if temperature != 1.0:
                 logits = logits / temperature
             if top_k > 0:
