@@ -4,46 +4,41 @@ train:
   validate_at_start: true
   test: false
   ckpt: null
-  ckpt_dir: ~/ckpt
 
 dataset:
   name: mnist_generation
   bsz: 8
   num_workers: 0
-  data_dir: ~/data
+  data_dir: ~/projects/data
   input_type: raw
   target_type: token
 
 # Small model for speed (used by CPU class after the code tweak below)
 model:
+  name: s4
   args:
-    n_layer: 4
-    d_model: 64
-    d_intermediate: 0
+    d_input: 1
     vocab_size: 256
-    ssm_cfg:
-      layer: Mamba2
-      d_state: 128
-      d_conv: 4
-      expand: 4
-      headdim: 16
-      ngroups: 1
-      chunk_size: 16
-    rms_norm: true
-    fused_add_norm: true
-    residual_in_fp32: true
+    d_model: 128
+    n_layers: 4
+    dropout: 0.2
+    d_state: 128
+    prenorm: true
+    lr: 0.001
     input_type: raw
     output_type: logits
+    backend: naive
+
+metrics: ["loss"]
 
 # Optimizer
 lr: 0.001
-weight_decay: 0.0
-lr_schedule: true
+weight_decay: 0.01
+lr_schedule: false
 pct_start: 0.1
 total_steps: null
 task_type: generation
 loss: cross_entropy
-use_fused_kernel: true
 output2input_preprocess_fn_name: mnist_token2raw
 
 # Lightning Trainer
@@ -60,11 +55,11 @@ trainer:
   enable_checkpointing: false
 
 wandb:
-  project: mamba2-mnist
+  project: s4-mnist
   name: dryrun
-callbacks:
+callbacks: 
   ImagePrefixSamplerCallback:
-    num_samples: 4
+    num_samples: 8
     every_n_epochs: 1
     sample_prefix_length: 257
     max_length: 785
