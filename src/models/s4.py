@@ -33,6 +33,7 @@ class S4Model(nn.Module):
         output_type="logits",
         pooling=False,
         backend="cuda",
+        mult_act=None,
     ):
         super().__init__()
 
@@ -62,6 +63,7 @@ class S4Model(nn.Module):
                     wd=wd,
                     d_state=d_state,
                     backend=backend,
+                    mult_act=mult_act,
                 )
             )
             self.norms.append(nn.LayerNorm(d_model))
