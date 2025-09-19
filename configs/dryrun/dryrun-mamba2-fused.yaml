@@ -2,35 +2,39 @@
 train:
   seed: 0
   validate_at_start: true
-  test: true
+  test: false
   ckpt: null
   ckpt_dir: ~/ckpt
 
 dataset:
   name: mnist_generation
-  bsz: 128
+  bsz: 8
   num_workers: 0
-  data_dir: ~/projects/data
+  data_dir: ~/data
   input_type: raw
   target_type: token
 
 # Small model for speed (used by CPU class after the code tweak below)
 model:
-  name: s4
+  name: mamba2_fused
   args:
-    d_input: 1
-    vocab_size: 256
+    n_layer: 4
     d_model: 128
-    n_layers: 4
-    dropout: 0.0
-    d_state: 64
-    prenorm: true
-    lr: 0.0001
-    wd: 0.0
+    d_intermediate: 0
+    vocab_size: 256
+    ssm_cfg:
+      layer: Mamba2
+      d_state: 128
+      d_conv: 4
+      expand: 1
+      headdim: 16
+      ngroups: 1
+      chunk_size: 128
+    rms_norm: true
+    fused_add_norm: true
+    residual_in_fp32: true
     input_type: raw
     output_type: logits
-    backend: naive
-    mult_act: gelu
 
 metrics: ["loss", "accuracy"]
 
@@ -49,20 +53,20 @@ trainer:
   accelerator: gpu
   devices: 1
   precision: 32
-  max_epochs: 100
-  fast_dev_run: false          # one batch train/val/test and exit
-  limit_train_batches: null       # safety; only a couple batches
-  limit_val_batches: null
-  limit_test_batches: null
-  log_every_n_steps: null
-  enable_checkpointing: true
+  max_epochs: 1
+  fast_dev_run: true           # one batch train/val/test and exit
+  limit_train_batches: 2       # safety; only a couple batches
+  limit_val_batches: 1
+  limit_test_batches: 0
+  log_every_n_steps: 1
+  enable_checkpointing: false
 
 wandb:
-  project: s4-mnist
-  name: gelu-noschedule-298kparams
-callbacks: 
+  project: mamba2-mnist
+  name: dryrun
+callbacks:
   ImagePrefixSamplerCallback:
-    num_samples: 8
+    num_samples: 4
     every_n_epochs: 1
     sample_prefix_length: 257
     max_length: 785

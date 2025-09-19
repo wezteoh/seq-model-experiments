@@ -1,6 +1,6 @@
-# Minimal, fast debug run on CPU
+# Training run config
 train:
-  seed: 0
+  seed: 42
   validate_at_start: true
   test: true
   ckpt: null
@@ -10,35 +10,44 @@ dataset:
   name: mnist_generation
   bsz: 128
   num_workers: 0
-  data_dir: ~/projects/data
+  data_dir: ~/data
   input_type: raw
   target_type: token
 
 # Small model for speed (used by CPU class after the code tweak below)
 model:
-  name: s4
+  name: mamba2_fused
   args:
-    d_input: 1
+    n_layer: 4
+    d_model: 64
+    d_intermediate: 0
     vocab_size: 256
-    d_model: 128
-    n_layers: 4
-    dropout: 0.0
-    d_state: 64
-    prenorm: true
-    lr: 0.0001
-    wd: 0.0
+    ssm_cfg:
+      layer: Mamba2
+      d_state: 128
+      d_conv: 4
+      expand: 4
+      headdim: 16
+      ngroups: 1
+      chunk_size: 128
+      bias: false
+      conv_bias: false
+    rms_norm: true
+    fused_add_norm: true
+    residual_in_fp32: true
     input_type: raw
     output_type: logits
-    backend: naive
-    mult_act: gelu
 
 metrics: ["loss", "accuracy"]
 
 # Optimizer
-lr: 0.001
-weight_decay: 0.01
-lr_schedule: false
+lr: 0.002
+weight_decay: 0.0
+lr_schedule: true
 pct_start: 0.1
+div_factor: 10.0
+final_div_factor: 50.0
+
 total_steps: null
 task_type: generation
 loss: cross_entropy
@@ -58,9 +67,9 @@ trainer:
   enable_checkpointing: true
 
 wandb:
-  project: s4-mnist
-  name: gelu-noschedule-298kparams
-callbacks: 
+  project: mamba2-mnist
+  name: 292kparams-schedule-nowd-lr2e-3
+callbacks:
   ImagePrefixSamplerCallback:
     num_samples: 8
     every_n_epochs: 1
