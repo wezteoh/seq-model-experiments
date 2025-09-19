@@ -130,49 +130,6 @@ class SequenceLightningModule(pl.LightningModule):
 
         return loss
 
-    # def configure_optimizers(self):
-    #     lr = self.hparams.lr
-    #     weight_decay = self.hparams.weight_decay
-
-    #     param_groups = [{"params": self.model.parameters(), "lr": lr, "weight_decay": weight_decay}]
-    #     optimizer = AdamW(param_groups)
-
-    #     # Scheduler to mimic optax.cosine_onecycle_schedule
-    #     # In PyTorch: OneCycleLR with annealing='cos' gives the cosine one-cycle shape.
-    #     if self.hparams.lr_schedule:
-    #         # Lightning can infer total steps: trainer.estimated_stepping_batches
-    #         total_steps = self.hparams.total_steps or getattr(
-    #             self.trainer, "estimated_stepping_batches", None
-    #         )
-    #         if total_steps is None:
-    #             raise ValueError(
-    #                 "total_steps not set. Pass total_steps=... to the module "
-    #                 "or let Lightning set trainer.estimated_stepping_batches by calling trainer.fit first."
-    #             )
-
-    #         # For OneCycleLR we must pass max_lr per param group.
-    #         # Use each group's current lr as its max_lr (the 'peak_value' from your optax code).
-    #         max_lrs = [g.get("lr", lr) for g in optimizer.param_groups]
-
-    #         scheduler = OneCycleLR(
-    #             optimizer,
-    #             max_lr=max_lrs,
-    #             total_steps=total_steps,
-    #             pct_start=self.hparams.pct_start,
-    #             anneal_strategy="cos",
-    #             cycle_momentum=False,
-    #         )
-    #         return {
-    #             "optimizer": optimizer,
-    #             "lr_scheduler": {
-    #                 "scheduler": scheduler,
-    #                 "interval": "step",  # OneCycleLR updates every step
-    #                 "frequency": 1,
-    #             },
-    #         }
-    #     else:
-    #         return optimizer
-
     def configure_optimizers(
         self,
     ):
@@ -229,6 +186,8 @@ class SequenceLightningModule(pl.LightningModule):
                 pct_start=self.hparams.pct_start,
                 anneal_strategy="cos",
                 cycle_momentum=False,
+                div_factor=self.hparams.get("div_factor", 25.0),
+                final_div_factor=self.hparams.get("final_div_factor", 10000.0),
             )
             return {
                 "optimizer": optimizer,
