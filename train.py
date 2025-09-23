@@ -143,7 +143,12 @@ class SequenceLightningModule(pl.LightningModule):
         params = [p for p in all_parameters if not hasattr(p, "_optim")]
 
         # Create an optimizer with the general parameters
-        optimizer = AdamW(params, lr=lr, weight_decay=weight_decay)
+        optimizer = AdamW(
+            params,
+            lr=lr,
+            weight_decay=weight_decay,
+            betas=(self.hparams.get("beta1", 0.9), self.hparams.get("beta2", 0.95)),
+        )
 
         # Add parameters with special hyperparameters
         hps = [getattr(p, "_optim") for p in all_parameters if hasattr(p, "_optim")]

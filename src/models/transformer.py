@@ -31,6 +31,7 @@ class TransformerModel(nn.Module, CustomGenerationMixin):
         output_type: str = "logits",
         vocab_size: int | None = None,
         out_value_size: int | None = None,
+        device: str = None,
     ):
         super().__init__()
         self.input_type = input_type
@@ -50,7 +51,13 @@ class TransformerModel(nn.Module, CustomGenerationMixin):
         self.layers = nn.ModuleList(
             [
                 TransformerBlock(
-                    d_model, num_heads, d_ff, use_rope, theta, max_seq_len=context_length
+                    d_model,
+                    num_heads,
+                    d_ff,
+                    use_rope,
+                    theta,
+                    max_seq_len=context_length,
+                    device=device,
                 )
                 for _ in range(num_layers)
             ]

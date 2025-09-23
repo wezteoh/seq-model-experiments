@@ -1,0 +1,66 @@
+# Minimal, fast debug run on CPU
+train:
+  seed: 0
+  validate_at_start: true
+  test: false
+  ckpt: null
+  ckpt_dir: ~/ckpt
+
+dataset:
+  name: mnist_generation
+  bsz: 8
+  num_workers: 0
+  data_dir: ~/data
+  input_type: raw
+  target_type: token
+
+# Small model for speed (used by CPU class after the code tweak below)
+model:
+  name: transformer
+  args:
+    context_length: 785
+    num_layers: 4
+    d_model: 128
+    num_heads: 4
+    d_ff: 256
+    use_rope: True
+    theta: 10000.0
+    input_type: raw
+    output_type: logits
+    vocab_size: 256
+
+metrics: ["loss", "accuracy"]
+
+# Optimizer
+lr: 0.001
+weight_decay: 0.01
+lr_schedule: false
+pct_start: 0.1
+total_steps: null
+task_type: generation
+loss: cross_entropy
+output2input_preprocess_fn_name: mnist_token2raw
+
+# Lightning Trainer
+trainer:
+  accelerator: gpu
+  devices: 1
+  precision: 32
+  max_epochs: 1
+  fast_dev_run: true           # one batch train/val/test and exit
+  limit_train_batches: 2       # safety; only a couple batches
+  limit_val_batches: 1
+  limit_test_batches: 0
+  log_every_n_steps: 1
+  enable_checkpointing: false
+  gradient_clip_val: 1.0
+
+wandb:
+  project: transformer-mnist
+  name: dryrun
+callbacks:
+  ImagePrefixSamplerCallback:
+    num_samples: 4
+    every_n_epochs: 1
+    sample_prefix_length: 257
+    max_length: 785
