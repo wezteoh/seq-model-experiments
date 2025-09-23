@@ -14,6 +14,8 @@ from einops import rearrange, repeat
 from pytorch_lightning.utilities import rank_zero_only
 from scipy import special as ss
 
+from .basic import Activation
+
 # Function aliases
 contract = torch.einsum
 
@@ -200,29 +202,6 @@ def log_vandermonde_transpose_naive(u, v, x, L):
 
 
 """ Simple nn.Module components """
-
-
-def Activation(activation=None, dim=-1):
-    if activation in [None, "id", "identity", "linear"]:
-        return nn.Identity()
-    elif activation == "tanh":
-        return nn.Tanh()
-    elif activation == "relu":
-        return nn.ReLU()
-    elif activation == "gelu":
-        return nn.GELU()
-    elif activation == "elu":
-        return nn.ELU()
-    elif activation in ["swish", "silu"]:
-        return nn.SiLU()
-    elif activation == "glu":
-        return nn.GLU(dim=dim)
-    elif activation == "sigmoid":
-        return nn.Sigmoid()
-    elif activation == "softplus":
-        return nn.Softplus()
-    else:
-        raise NotImplementedError("hidden activation '{}' is not implemented".format(activation))
 
 
 def LinearActivation(
@@ -2126,18 +2105,6 @@ class S4Block(nn.Module):
 
 
 if __name__ == "__main__":
-    # block = S4Block(
-    #     d_model=128,
-    #     bottleneck=2,
-    #     gate=2,
-    #     gate_act=None,
-    #     mult_act=None,
-    #     final_act=None,
-    #     postact=None,
-    #     dropout=0.2,
-    #     tie_dropout=False,
-    #     transposed=True,
-    # )
     block = S4Block(
         d_model=1,
         d_state=20,

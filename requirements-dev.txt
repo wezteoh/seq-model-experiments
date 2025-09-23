@@ -10,3 +10,4 @@ pytorch-lightning==2.5.3
 einops==0.8.1
 ipdb==0.13.13
 scipy==1.13.1
+transformers[torch]==4.56.2

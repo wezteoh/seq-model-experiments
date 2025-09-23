@@ -16,5 +16,10 @@ def get_model(name, args, device):
 
         return S4Model(**args)
 
+    elif name == "transformer":
+        from .transformer import TransformerModel
+
+        return TransformerModel(**args)
+
     else:
         raise ValueError(f"Invalid model name: {name}")
