@@ -14,7 +14,6 @@ dataset:
   input_type: raw
   target_type: token
 
-# Small model for speed (used by CPU class after the code tweak below)
 model:
   name: mamba2_fused
   args:
@@ -22,6 +21,18 @@ model:
     d_model: 64
     d_intermediate: 0
     vocab_size: 256
+    attn_layer_idx: [2]
+    attn_cfg:
+      num_heads: 4
+      mlp_dim: 128
+      qkv_proj_bias: false
+      out_proj_bias: false
+      softmax_scale: null
+      causal: true
+      d_conv: 0
+      rotary_emb_dim: 16
+      rotary_emb_base: 10000.0
+      rotary_emb_interleaved: true
     ssm_cfg:
       layer: Mamba2
       d_state: 128
@@ -30,11 +41,9 @@ model:
       headdim: 16
       ngroups: 1
       chunk_size: 128
-      bias: false
-      conv_bias: false
     rms_norm: true
     fused_add_norm: true
-    residual_in_fp32: true
+    residual_in_fp32: false
     input_type: raw
     output_type: logits
 
@@ -42,11 +51,13 @@ metrics: ["loss", "accuracy"]
 
 # Optimizer
 lr: 0.003
-weight_decay: 0.0
+weight_decay: 0.01
 lr_schedule: true
 pct_start: 0.1
 div_factor: 15.0
 final_div_factor: 500.0
+beta1: 0.9
+beta2: 0.95
 
 total_steps: null
 task_type: generation
@@ -57,7 +68,7 @@ output2input_preprocess_fn_name: mnist_token2raw
 trainer:
   accelerator: gpu
   devices: 1
-  precision: 32
+  precision: "bf16-true"
   max_epochs: 100
   fast_dev_run: false          # one batch train/val/test and exit
   limit_train_batches: null       # safety; only a couple batches
@@ -65,10 +76,11 @@ trainer:
   limit_test_batches: null
   log_every_n_steps: null
   enable_checkpointing: true
+  gradient_clip_val: 1.0
 
 wandb:
-  project: mamba2-mnist
-  name: 292kparams-schedule-nowd-lr3e-3
+  project: mamba2attn-mnist
+  name: xkparams-schedule-lr3e-3
 callbacks:
   ImagePrefixSamplerCallback:
     num_samples: 8
