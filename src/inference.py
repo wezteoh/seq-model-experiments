@@ -11,6 +11,8 @@ from transformers.generation import (
     TextStreamer,
 )
 
+from src.utils import cast_floats_by_trainer_precision
+
 
 @dataclass
 class InferenceParams:
@@ -137,6 +139,7 @@ def decode(
     output_scores=False,
     streamer: Optional[TextStreamer] = None,
     output2input_preprocess_fn: Optional[Callable[[Tensor], Tensor]] = None,
+    precision: str = "32-true",
 ):
     """Decoding, either greedy or with top-k or top-p sampling.
     If top-k = 0, don't limit the number of candidates (pure sampling).
@@ -228,6 +231,7 @@ def decode(
         )  # handle token2raw transformation if needed
     else:
         model_inputs = input_ids
+    model_inputs = cast_floats_by_trainer_precision(model_inputs, precision=precision)
     while not should_stop(model_inputs, inference_params):
         logits = get_logits(model_inputs, inference_params)
         if output_scores:
@@ -240,11 +244,13 @@ def decode(
             sampled_tokens = sample_tokens(logits, inference_params)
             sequences_cat = torch.cat([sequences_cat, sampled_tokens], dim=1)
         sequences.append(sampled_tokens)
+
         model_inputs = (
             output2input_preprocess_fn(sampled_tokens)
             if output2input_preprocess_fn is not None
             else sampled_tokens
         )
+        model_inputs = cast_floats_by_trainer_precision(model_inputs, precision=precision)
         if streamer is not None:
             streamer.put(sampled_tokens.cpu())
     if streamer is not None:

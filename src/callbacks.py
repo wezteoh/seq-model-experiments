@@ -45,6 +45,7 @@ class ImagePrefixSamplerCallback(pl.Callback):
             top_k=self.top_k,
             eos_token_id=-1,
             output2input_preprocess_fn=pl_module.output2input_preprocess_fn,
+            precision=trainer.precision,
         )
         # trim dummy start of sequence
         samples = samples[:, 1:].cpu().numpy()

@@ -10,6 +10,7 @@ from torchvision import transforms
 from tqdm import tqdm
 
 from src.data_utils import Tokenizer, Vocab, generate_induction_head
+from src.utils import cast_floats_by_trainer_precision
 
 
 def get_output2input_preprocess_fn(preprocess_fn_name):
@@ -89,6 +90,8 @@ class MNISTSequenceGenerationDataModule(pl.LightningDataModule):
         if self.target_type == "raw":
             y = self.__class__.token2raw(y)
 
+        x = cast_floats_by_trainer_precision(x, precision=self.trainer.precision)
+        y = cast_floats_by_trainer_precision(y, precision=self.trainer.precision)
         return x, y
 
     def train_dataloader(self):
