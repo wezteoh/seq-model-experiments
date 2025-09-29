@@ -1,3 +1,5 @@
+from pathlib import Path
+
 import hydra
 import pytorch_lightning as pl
 import torch
@@ -37,9 +39,10 @@ class SequenceLightningModule(pl.LightningModule):
             loss = F.cross_entropy(output, y, ignore_index=-100)
         elif self.hparams["loss"] == "mse":
             output = pred.values
-            output = output.reshape(-1, output.shape[-1])
-            y = y.reshape(-1).long()
-            loss = F.mse_loss(output, y)
+            if self.hparams.trainer.accelerator == "cpu":
+                loss = F.mse_loss(output.float(), y.float())
+            else:
+                loss = F.mse_loss(output, y)
         return loss
 
     def forward(self, batch):
@@ -67,12 +70,6 @@ class SequenceLightningModule(pl.LightningModule):
         for metric in self.hparams.metrics:
             if metric == "loss":
                 record_step[f"trainer_{metric}"] = loss.item()
-            # elif metric == "accuracy":
-            #     # exclude ignore_index from accuracy calculation
-            #     pred_class = pred.logits.argmax(dim=-1)
-            #     record_step[f"trainer_{metric}"] = (
-            #         (pred_class[y != -100] == y[y != -100]).float().mean().item()
-            #     )
 
         self.log_dict(
             record_step,
@@ -91,12 +88,43 @@ class SequenceLightningModule(pl.LightningModule):
         loss = self.loss(pred, y)
 
         record = {}
-        for metric in self.hparams.metrics:
+        for metric, metric_detail in self.hparams.metrics.items():
             if metric == "loss":
                 record[f"validation_{metric}"] = loss.item()
-            elif metric == "accuracy":
+            elif self.hparams.model.args.output_type == "logits" and metric == "accuracy":
                 pred_class = pred.logits.argmax(dim=-1)
                 record[f"validation_{metric}"] = (pred_class == y).float().mean().item()
+            elif self.hparams.model.args.output_type == "values" and metric == "ade":
+                assert metric_detail["prefix_length"] > 0
+                x_prefix = x[:, : metric_detail["prefix_length"]]
+
+                pred_path = self.model.generate(
+                    x_prefix,
+                    max_length=y.shape[1] + 1,
+                    precision=self.trainer.precision,
+                )
+                pred_path = pred_path[:, metric_detail["prefix_length"] :]
+                pred_path = self.trainer.datamodule.unflatten_entity_dim(pred_path)
+                pred_path_unnormalized = self.trainer.datamodule.unnormalize(
+                    pred_path,
+                    self.trainer.datamodule.traj_space_width,
+                    self.trainer.datamodule.traj_space_height,
+                )
+
+                y_path = y[:, metric_detail["prefix_length"] - 1 :]
+                y_path = self.trainer.datamodule.unflatten_entity_dim(y_path)
+                y_path_unnormalized = self.trainer.datamodule.unnormalize(
+                    y_path,
+                    self.trainer.datamodule.traj_space_width,
+                    self.trainer.datamodule.traj_space_height,
+                )
+                displacement = torch.norm(pred_path_unnormalized - y_path_unnormalized, dim=-1)
+                record[f"validation_{metric}"] = displacement.mean().item()
+                if "grouping" in metric_detail:
+                    for group_name, idxs in metric_detail["grouping"].items():
+                        record[f"validation_{metric}_{group_name}"] = (
+                            displacement[..., idxs].mean().item()
+                        )
 
         self.log_dict(
             record,
@@ -225,7 +253,9 @@ def create_trainer(config):
     if config.trainer.enable_checkpointing:
         callbacks.append(
             ModelCheckpoint(
-                dirpath=config.train.ckpt_dir,  # <--- where to save
+                dirpath=Path(config.train.ckpt_dir)
+                / wandb.run.project
+                / f"{wandb.run.name}-{wandb.run.id}",  # <--- where to save
                 filename="epoch-{epoch:02d}-val_loss-{validation_loss:.2f}",
                 save_top_k=3,  # how many best models to keep
                 monitor="validation_loss",  # metric to monitor
@@ -235,6 +265,12 @@ def create_trainer(config):
     if config.get("callbacks") is not None:
         for _name_, callback_config in config.callbacks.items():
             callback = getattr(src.callbacks, _name_)
+            if "sample_dir" in callback_config:
+                callback_config["sample_dir"] = (
+                    Path(callback_config["sample_dir"])
+                    / wandb.run.project
+                    / f"{wandb.run.name}-{wandb.run.id}"
+                )
             callbacks.append(callback(**callback_config))
 
     # Profiler

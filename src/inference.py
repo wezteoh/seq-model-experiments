@@ -122,7 +122,84 @@ def sample(logits, top_k=1, top_p=0.0, min_p=0.0, temperature=1.0):
 
 
 @torch.inference_mode()
-def decode(
+def raw_decode(
+    inputs,
+    model,
+    max_length,
+    streamer: Optional[TextStreamer] = None,
+    cg: bool = False,
+    enable_timing=False,
+    precision: str = "32-true",
+    **kwargs,
+):
+    if streamer is not None:
+        streamer.put(inputs.cpu())
+
+    batch_size, seqlen_og = inputs.shape[:2]
+    if cg:
+        if not hasattr(model, "_decoding_cache"):
+            model._decoding_cache = None
+        model._decoding_cache = update_graph_cache(
+            model,
+            model._decoding_cache,
+            batch_size,
+            seqlen_og,
+            max_length,
+        )
+        inference_params = model._decoding_cache.inference_params
+        inference_params.reset(max_length, batch_size)
+    else:
+        inference_params = InferenceParams(max_seqlen=max_length, max_batch_size=batch_size)
+
+    def get_values(inputs, inference_params):
+        decoding = inference_params.seqlen_offset > 0
+        if decoding:
+            position_ids = torch.full(
+                (batch_size, 1),
+                inference_params.seqlen_offset,
+                dtype=torch.long,
+                device=inputs.device,
+            )
+        else:
+            position_ids = None
+        if not cg or not decoding:
+            values = model(
+                inputs,
+                position_ids=position_ids,
+                inference_params=inference_params,
+                num_last_tokens=1,
+            ).values
+        else:
+            values = model._decoding_cache.run(inputs, position_ids, inference_params.seqlen_offset)
+        return values
+
+    if torch.cuda.is_available():
+        start = torch.cuda.Event(enable_timing=enable_timing)
+        end = torch.cuda.Event(enable_timing=enable_timing)
+
+        if enable_timing:
+            start.record()
+    sequences = [inputs]
+    model_inputs = cast_floats_by_trainer_precision(inputs, precision=precision)
+    while inference_params.seqlen_offset < max_length - 1:
+        values = get_values(model_inputs, inference_params)
+        inference_params.seqlen_offset += model_inputs.shape[1]
+        model_inputs = values
+        model_inputs = cast_floats_by_trainer_precision(model_inputs, precision=precision)
+        if streamer is not None:
+            streamer.put(values.cpu())
+        sequences.append(values)
+    if streamer is not None:
+        streamer.end()
+    if torch.cuda.is_available() and enable_timing:
+        end.record()
+        torch.cuda.synchronize()
+        print(f"Prompt processing + decoding time: {(start.elapsed_time(end)):.0f}ms")
+    return torch.cat(sequences, dim=1)
+
+
+@torch.inference_mode()
+def token_decode(
     input_ids,
     model,
     max_length,
@@ -273,8 +350,14 @@ class CustomGenerationMixin:
         elif self.output_type == "values":
             return self.raw_generate(*args, **kwargs)
 
-    def raw_generate(self, *args, **kwargs):
-        raise NotImplementedError
+    def raw_generate(self, inputs, max_length, **kwargs):
+        output = raw_decode(
+            inputs,
+            self,
+            max_length,
+            **kwargs,
+        )
+        return output
 
     def token_generate(
         self,
@@ -288,7 +371,7 @@ class CustomGenerationMixin:
         output_scores=False,
         **kwargs,
     ):
-        output = decode(
+        output = token_decode(
             input_ids,
             self,
             max_length,

@@ -22,9 +22,11 @@ class Mamba2MixerModel(nn.Module, CustomGenerationMixin):
         d_intermediate: int,
         vocab_size: int | None = None,
         out_value_size: int | None = None,
+        input_value_size: int | None = None,
         ssm_cfg=None,
         attn_layer_idx=None,
         attn_cfg=None,
+        n_encoder_layer: int | None = None,
         norm_epsilon: float = 1e-5,
         rms_norm: bool = False,
         initializer_cfg=None,
@@ -46,12 +48,24 @@ class Mamba2MixerModel(nn.Module, CustomGenerationMixin):
             assert out_value_size is not None
 
         if self.input_type == "token":
+            assert n_encoder_layer is None, "n_encoder_layer must be None for token input type"
             self.encoder = nn.Embedding(vocab_size, d_model, **factory_kwargs)
         else:
-            self.encoder = nn.Linear(1, d_model, **factory_kwargs)
-            self.encoder.bias._no_reinit = True
-            # reinitalized as all 0s by initializer config from mamba_ssm package
-            # could result in symmetry issue / exploding gradients on certain inputs
+            assert (
+                n_encoder_layer is not None
+            ), "n_encoder_layer must be provided for raw input type"
+            assert (
+                input_value_size is not None
+            ), "input_value_size must be provided for raw input type"
+            encoder_layers = [nn.Linear(input_value_size, d_model, **factory_kwargs)]
+            for _ in range(n_encoder_layer - 1):
+                encoder_layers.append(
+                    nn.Sequential(
+                        nn.GELU(),
+                        nn.Linear(d_model, d_model, **factory_kwargs),
+                    )
+                )
+            self.encoder = nn.Sequential(*encoder_layers)
 
         # We change the order of residual and layer norm:
         # Instead of LN -> Attn / MLP -> Add, we do:

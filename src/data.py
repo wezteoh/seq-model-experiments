@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 from typing import Literal
 
 import numpy as np
@@ -26,6 +27,8 @@ def get_data_module_class(dataset_name):
         return MNISTSequenceGenerationDataModule
     if dataset_name in ("icl"):
         return ICLDataModule
+    if dataset_name == "trajectory_generation":
+        return TrajectoryDataModule
     raise ValueError(f"Dataset {dataset_name} not supported")
 
 
@@ -43,7 +46,12 @@ class MNISTSequenceGenerationDataModule(pl.LightningDataModule):
         return torch.cat([torch.zeros_like(x[:, 0:1]), x], dim=1)
 
     def __init__(
-        self, bsz=128, num_workers=4, input_type="raw", target_type="token", data_dir="./data"
+        self,
+        bsz=128,
+        num_workers=4,
+        input_type="raw",
+        target_type="token",
+        data_dir="./data",
     ):
         super().__init__()
         self.bsz = bsz
@@ -339,3 +347,101 @@ class ICLDataModule(pl.LightningDataModule):
             pin_memory=True,
             persistent_workers=self.num_workers > 0,
         )
+
+
+class TrajectoryDataModule(pl.LightningDataModule):
+
+    SUPPORTED_TASK_TYPE = "generation"
+
+    @classmethod
+    def flatten_entity_dim(cls, x):
+        return x.flatten(start_dim=-2)
+
+    @classmethod
+    def unflatten_entity_dim(cls, x):
+        return x.reshape((*x.shape[:-1], -1, 2))
+
+    @classmethod
+    def normalize(cls, x, width, height):
+        x = x.clone()
+        x[..., 0] = 2 * x[..., 0] / float(width) - 1
+        x[..., 1] = 2 * x[..., 1] / float(height) - 1
+        return x
+
+    @classmethod
+    def unnormalize(cls, x, width, height):
+        x = x.clone()
+        x[..., 0] = (x[..., 0] + 1) * float(width) / 2
+        x[..., 1] = (x[..., 1] + 1) * float(height) / 2
+        return x
+
+    @classmethod
+    def pad_start_of_sequence(cls, x):
+        return torch.cat([torch.ones_like(x[:, 0:1]), x], dim=1) * -1.0
+
+    def __init__(
+        self,
+        data_dir: str = None,
+        bsz: int = 32,
+        num_workers: int = 4,
+        traj_space_width: int = 94,
+        traj_space_height: int = 50,
+        pad_start_of_sequence: bool = True,
+        input_type: Literal["raw"] = "raw",
+        target_type: Literal["raw"] = "raw",
+    ):
+        super().__init__()
+        self.data_dir = Path(os.path.expanduser(data_dir))
+        self.bsz = bsz
+        self.num_workers = num_workers
+        self.traj_space_width = traj_space_width
+        self.traj_space_height = traj_space_height
+        self.pad_start_of_sequence = pad_start_of_sequence
+
+    def prepare_data(self):
+        pass
+
+    def setup(self, stage=None):
+        train_data = np.load(self.data_dir / "train_clean.p", allow_pickle=True)
+        test_data = np.load(self.data_dir / "test_clean.p", allow_pickle=True)
+        self.dataset = {
+            "train": train_data,
+            "test": test_data,
+        }
+
+    def train_dataloader(self, *args, **kwargs):
+        return self._data_loader(self.dataset["train"], shuffle=True)
+
+    def val_dataloader(self, *args, **kwargs):
+        return self._data_loader(self.dataset["test"], shuffle=False)
+
+    def test_dataloader(self, *args, **kwargs):
+        return self._data_loader(self.dataset["test"], shuffle=False)
+
+    def _data_loader(self, dataset: Dataset, shuffle: bool = False) -> DataLoader:
+        return DataLoader(
+            dataset,
+            batch_size=self.bsz,
+            num_workers=self.num_workers,
+            shuffle=shuffle,
+            pin_memory=True,
+            persistent_workers=self.num_workers > 0,
+        )
+
+    def on_after_batch_transfer(self, batch, dataloader_idx: int):
+
+        x = batch
+        x = self.__class__.normalize(x, self.traj_space_width, self.traj_space_height)
+        x = self.__class__.flatten_entity_dim(x)
+        y = x.clone()
+
+        # slide x one step back
+        if self.pad_start_of_sequence:
+            x = self.__class__.pad_start_of_sequence(x)
+        else:
+            x = x[:, :-1]
+            y = y[:, 1:]
+
+        x = cast_floats_by_trainer_precision(x, precision=self.trainer.precision)
+        y = cast_floats_by_trainer_precision(y, precision=self.trainer.precision)
+        return x, y

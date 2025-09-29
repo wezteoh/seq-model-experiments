@@ -11,3 +11,6 @@ einops==0.8.1
 ipdb==0.13.13
 scipy==1.13.1
 transformers[torch]==4.56.2
+imageio==2.37.0
+imageio-ffmpeg==0.6.0
+matplotlib==3.10.6

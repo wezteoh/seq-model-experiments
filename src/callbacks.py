@@ -1,8 +1,16 @@
+import os
+from pathlib import Path
+
 import pytorch_lightning as pl
 import torch
 import wandb
 
-from src.utils import bw_to_rgb, unflatten_images
+from src.utils import (
+    bw_to_rgb,
+    create_frames_from_trajectory,
+    create_video_from_frames,
+    unflatten_images,
+)
 
 
 class ImagePrefixSamplerCallback(pl.Callback):
@@ -86,6 +94,79 @@ class InductionHeadTextSamplerCallback(pl.Callback):
             table.add_data(epoch, sample)
         at.add(table, "samples")
         wandb.log_artifact(at)
+
+        if pl_module.training:  # restore training mode
+            pl_module.train()
+
+
+class TrajectoryPrefixSamplerCallback(pl.Callback):
+    def __init__(
+        self,
+        num_samples=16,
+        every_n_epochs=1,
+        sample_dir="./samples",
+        game="basketball",
+        sample_prefix_length=10,
+        max_length=100,
+        downsampling_ratio=1,
+        fps=2,
+    ):
+        super().__init__()
+        self.num_samples = num_samples
+        self.every_n_epochs = every_n_epochs
+        self.sample_dir = os.path.expanduser(sample_dir)
+        Path(self.sample_dir).mkdir(parents=True, exist_ok=False)
+        self.game = game
+        self.sample_prefix_length = sample_prefix_length
+        self.max_length = max_length
+        self.downsampling_ratio = downsampling_ratio
+        self.fps = fps
+
+    def on_validation_epoch_end(self, trainer, pl_module):
+        epoch = trainer.current_epoch
+        if epoch % self.every_n_epochs != 0 or trainer.state.fn != "fit":
+            return  # only run every N epochs
+
+        sample_loader = trainer.val_dataloaders
+        batch = next(iter(sample_loader))
+        x = batch[: self.num_samples]
+
+        if epoch == 0:
+            examples = x.clone().cpu().numpy()
+            example_videos = []
+            for i, example in enumerate(examples):
+                example = example[:: self.downsampling_ratio]
+                frames = create_frames_from_trajectory(example, game=self.game)
+                video_path = f"{self.sample_dir}/example_{i}.mp4"
+                create_video_from_frames(frames, video_path, fps=self.fps)
+                example_videos.append(wandb.Video(video_path, format="mp4"))
+            wandb.log({"examples": example_videos}, commit=False)
+
+        x = trainer.datamodule.normalize(
+            x, trainer.datamodule.traj_space_width, trainer.datamodule.traj_space_height
+        )
+        x = trainer.datamodule.flatten_entity_dim(x)
+        if trainer.datamodule.pad_start_of_sequence:
+            x = trainer.datamodule.pad_start_of_sequence(x)
+        x = x[:, : self.sample_prefix_length].to(pl_module.device)
+        samples = pl_module.model.generate(
+            x,
+            max_length=self.max_length,
+            precision=trainer.precision,
+        )
+        samples = trainer.datamodule.unflatten_entity_dim(samples)
+        samples = trainer.datamodule.unnormalize(
+            samples, trainer.datamodule.traj_space_width, trainer.datamodule.traj_space_height
+        )
+        samples = samples.cpu().numpy()
+        sample_videos = []
+        for i, sample in enumerate(samples):
+            sample = sample[:: self.downsampling_ratio]
+            frames = create_frames_from_trajectory(sample, game=self.game)
+            video_path = f"{self.sample_dir}/epoch_{epoch}_sample_{i}.mp4"
+            create_video_from_frames(frames, video_path, fps=self.fps)
+            sample_videos.append(wandb.Video(video_path, format="mp4"))
+        wandb.log({"samples": sample_videos}, commit=False)
 
         if pl_module.training:  # restore training mode
             pl_module.train()

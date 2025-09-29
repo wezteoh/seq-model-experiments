@@ -21,9 +21,9 @@ class TransformerModel(nn.Module, CustomGenerationMixin):
     def __init__(
         self,
         context_length: int,
-        num_layers: int,
+        n_layer: int,
         d_model: int,
-        num_heads: int,
+        n_head: int,
         d_ff: int,
         use_rope: bool = True,
         theta: float = 10000.0,
@@ -31,6 +31,8 @@ class TransformerModel(nn.Module, CustomGenerationMixin):
         output_type: str = "logits",
         vocab_size: int | None = None,
         out_value_size: int | None = None,
+        input_value_size: int | None = None,
+        n_encoder_layer: int | None = None,
         device: str = None,
     ):
         super().__init__()
@@ -44,26 +46,43 @@ class TransformerModel(nn.Module, CustomGenerationMixin):
             assert out_value_size is not None
 
         if self.input_type == "token":
+            assert n_encoder_layer is None, "n_encoder_layer must be None for token input type"
             self.encoder = nn.Embedding(vocab_size, d_model)
         else:
-            self.encoder = nn.Linear(1, d_model)
+            assert (
+                n_encoder_layer is not None
+            ), "n_encoder_layer must be provided for raw input type"
+            assert (
+                input_value_size is not None
+            ), "input_value_size must be provided for raw input type"
+            encoder_layers = [nn.Linear(input_value_size, d_model)]
+            for _ in range(n_encoder_layer - 1):
+                encoder_layers.append(
+                    nn.Sequential(
+                        nn.GELU(),
+                        nn.Linear(d_model, d_model),
+                    )
+                )
+            self.encoder = nn.Sequential(*encoder_layers)
 
         self.layers = nn.ModuleList(
             [
                 TransformerBlock(
                     d_model,
-                    num_heads,
+                    n_head,
                     d_ff,
                     use_rope,
                     theta,
                     max_seq_len=context_length,
                     device=device,
                 )
-                for _ in range(num_layers)
+                for _ in range(n_layer)
             ]
         )
         self.ln_final = RMSNorm(d_model)
-        self.lm_head = nn.Linear(d_model, vocab_size, bias=False)
+        self.lm_head = nn.Linear(
+            d_model, vocab_size if self.output_type == "logits" else out_value_size, bias=False
+        )
 
     def forward(
         self,
