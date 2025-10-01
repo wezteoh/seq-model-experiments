@@ -123,3 +123,24 @@ def generate_induction_head(
     #     to_copy = vocab_seq[pos+1]
     vocab_seq = vocab_seq + to_copy
     return " ".join(vocab_seq)
+
+
+def normalize(x: torch.Tensor, mean: torch.Tensor, std: torch.Tensor):
+    x = x.clone()
+    x = (x - mean) / std
+    return x
+
+
+def unnormalize(x: torch.Tensor, mean: torch.Tensor, std: torch.Tensor):
+    x = x.clone()
+    x = x * std
+    x = x + mean
+    return x
+
+
+def flatten_trajectory_entity_dim(x: torch.Tensor):
+    return x.flatten(start_dim=-2)
+
+
+def unflatten_trajectory_entity_dim(x: torch.Tensor):
+    return x.reshape((*x.shape[:-1], -1, 2))

@@ -142,21 +142,25 @@ class TrajectoryPrefixSamplerCallback(pl.Callback):
                 example_videos.append(wandb.Video(video_path, format="mp4"))
             wandb.log({"examples": example_videos}, commit=False)
 
-        x = trainer.datamodule.normalize(
-            x, trainer.datamodule.traj_space_width, trainer.datamodule.traj_space_height
-        )
-        x = trainer.datamodule.flatten_entity_dim(x)
-        if trainer.datamodule.pad_start_of_sequence:
-            x = trainer.datamodule.pad_start_of_sequence(x)
         x = x[:, : self.sample_prefix_length].to(pl_module.device)
         samples = pl_module.model.generate(
             x,
             max_length=self.max_length,
             precision=trainer.precision,
-        )
-        samples = trainer.datamodule.unflatten_entity_dim(samples)
-        samples = trainer.datamodule.unnormalize(
-            samples, trainer.datamodule.traj_space_width, trainer.datamodule.traj_space_height
+            is_trajectory=True,
+            output_diff=getattr(trainer.datamodule, "diff_as_target", False),
+            data_mean=trainer.datamodule.data_mean,
+            data_std=trainer.datamodule.data_std,
+            diff_mean=(
+                trainer.datamodule.diff_mean
+                if getattr(trainer.datamodule, "diff_as_target", False)
+                else None
+            ),
+            diff_std=(
+                trainer.datamodule.diff_std
+                if getattr(trainer.datamodule, "diff_as_target", False)
+                else None
+            ),
         )
         samples = samples.cpu().numpy()
         sample_videos = []

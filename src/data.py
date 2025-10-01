@@ -10,7 +10,13 @@ from torch.utils.data import DataLoader, Dataset, TensorDataset
 from torchvision import transforms
 from tqdm import tqdm
 
-from src.data_utils import Tokenizer, Vocab, generate_induction_head
+from src.data_utils import (
+    Tokenizer,
+    Vocab,
+    flatten_trajectory_entity_dim,
+    generate_induction_head,
+    normalize,
+)
 from src.utils import cast_floats_by_trainer_precision
 
 
@@ -350,53 +356,32 @@ class ICLDataModule(pl.LightningDataModule):
 
 
 class TrajectoryDataModule(pl.LightningDataModule):
-
     SUPPORTED_TASK_TYPE = "generation"
-
-    @classmethod
-    def flatten_entity_dim(cls, x):
-        return x.flatten(start_dim=-2)
-
-    @classmethod
-    def unflatten_entity_dim(cls, x):
-        return x.reshape((*x.shape[:-1], -1, 2))
-
-    @classmethod
-    def normalize(cls, x, width, height):
-        x = x.clone()
-        x[..., 0] = 2 * x[..., 0] / float(width) - 1
-        x[..., 1] = 2 * x[..., 1] / float(height) - 1
-        return x
-
-    @classmethod
-    def unnormalize(cls, x, width, height):
-        x = x.clone()
-        x[..., 0] = (x[..., 0] + 1) * float(width) / 2
-        x[..., 1] = (x[..., 1] + 1) * float(height) / 2
-        return x
-
-    @classmethod
-    def pad_start_of_sequence(cls, x):
-        return torch.cat([torch.ones_like(x[:, 0:1]), x], dim=1) * -1.0
+    is_trajectory = True
+    normalize = True
 
     def __init__(
         self,
         data_dir: str = None,
         bsz: int = 32,
         num_workers: int = 4,
-        traj_space_width: int = 94,
-        traj_space_height: int = 50,
-        pad_start_of_sequence: bool = True,
+        data_mean: list[float] = [0.0, 0.0],
+        data_std: list[float] = [1.0, 1.0],
+        diff_mean: list[float] = [0.0, 0.0],
+        diff_std: list[float] = [1.0, 1.0],
         input_type: Literal["raw"] = "raw",
         target_type: Literal["raw"] = "raw",
+        diff_as_target: bool = False,
     ):
         super().__init__()
         self.data_dir = Path(os.path.expanduser(data_dir))
         self.bsz = bsz
         self.num_workers = num_workers
-        self.traj_space_width = traj_space_width
-        self.traj_space_height = traj_space_height
-        self.pad_start_of_sequence = pad_start_of_sequence
+        self.data_mean = torch.tensor(data_mean)
+        self.data_std = torch.tensor(data_std)
+        self.diff_mean = torch.tensor(diff_mean)
+        self.diff_std = torch.tensor(diff_std)
+        self.diff_as_target = diff_as_target
 
     def prepare_data(self):
         pass
@@ -429,18 +414,25 @@ class TrajectoryDataModule(pl.LightningDataModule):
         )
 
     def on_after_batch_transfer(self, batch, dataloader_idx: int):
+        if self.data_mean.device != batch.device:
+            self.data_mean = self.data_mean.to(batch.device)
+            self.data_std = self.data_std.to(batch.device)
+            if self.diff_as_target:
+                self.diff_mean = self.diff_mean.to(batch.device)
+                self.diff_std = self.diff_std.to(batch.device)
 
-        x = batch
-        x = self.__class__.normalize(x, self.traj_space_width, self.traj_space_height)
-        x = self.__class__.flatten_entity_dim(x)
-        y = x.clone()
+        x = normalize(batch, self.data_mean, self.data_std)
+        x = flatten_trajectory_entity_dim(x)
+        if self.diff_as_target:
+            y = torch.diff(batch, dim=1)
+            y = normalize(y, self.diff_mean, self.diff_std)
+            y = flatten_trajectory_entity_dim(y)
+        else:
+            y = x.clone()
+            y = x[:, 1:]
 
         # slide x one step back
-        if self.pad_start_of_sequence:
-            x = self.__class__.pad_start_of_sequence(x)
-        else:
-            x = x[:, :-1]
-            y = y[:, 1:]
+        x = x[:, :-1]
 
         x = cast_floats_by_trainer_precision(x, precision=self.trainer.precision)
         y = cast_floats_by_trainer_precision(y, precision=self.trainer.precision)

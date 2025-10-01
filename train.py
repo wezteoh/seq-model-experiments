@@ -14,6 +14,7 @@ from torch.optim.lr_scheduler import OneCycleLR
 
 import src.callbacks
 from src.data import get_data_module_class, get_output2input_preprocess_fn
+from src.data_utils import unflatten_trajectory_entity_dim, unnormalize
 from src.models import get_model
 
 
@@ -96,29 +97,65 @@ class SequenceLightningModule(pl.LightningModule):
                 record[f"validation_{metric}"] = (pred_class == y).float().mean().item()
             elif self.hparams.model.args.output_type == "values" and metric == "ade":
                 assert metric_detail["prefix_length"] > 0
-                x_prefix = x[:, : metric_detail["prefix_length"]]
-
-                pred_path = self.model.generate(
-                    x_prefix,
+                x_un = unnormalize(
+                    unflatten_trajectory_entity_dim(x),
+                    self.trainer.datamodule.data_mean,
+                    self.trainer.datamodule.data_std,
+                )
+                x_prefix_un = x_un[:, : metric_detail["prefix_length"]]
+                output = self.model.generate(
+                    x_prefix_un,
                     max_length=y.shape[1] + 1,
                     precision=self.trainer.precision,
+                    is_trajectory=getattr(self.trainer.datamodule, "is_trajectory", False),
+                    output_diff=getattr(self.trainer.datamodule, "diff_as_target", False),
+                    data_mean=(
+                        self.trainer.datamodule.data_mean
+                        if getattr(self.trainer.datamodule, "normalize", False)
+                        else None
+                    ),
+                    data_std=(
+                        self.trainer.datamodule.data_std
+                        if getattr(self.trainer.datamodule, "normalize", False)
+                        else None
+                    ),
+                    diff_mean=(
+                        self.trainer.datamodule.diff_mean
+                        if getattr(self.trainer.datamodule, "normalize", False)
+                        and getattr(self.trainer.datamodule, "diff_as_target", False)
+                        else None
+                    ),
+                    diff_std=(
+                        self.trainer.datamodule.diff_std
+                        if getattr(self.trainer.datamodule, "normalize", False)
+                        and getattr(self.trainer.datamodule, "diff_as_target", False)
+                        else None
+                    ),
                 )
-                pred_path = pred_path[:, metric_detail["prefix_length"] :]
-                pred_path = self.trainer.datamodule.unflatten_entity_dim(pred_path)
-                pred_path_unnormalized = self.trainer.datamodule.unnormalize(
-                    pred_path,
-                    self.trainer.datamodule.traj_space_width,
-                    self.trainer.datamodule.traj_space_height,
-                )
+                pred_path_un = output[:, metric_detail["prefix_length"] :]
 
-                y_path = y[:, metric_detail["prefix_length"] - 1 :]
-                y_path = self.trainer.datamodule.unflatten_entity_dim(y_path)
-                y_path_unnormalized = self.trainer.datamodule.unnormalize(
-                    y_path,
-                    self.trainer.datamodule.traj_space_width,
-                    self.trainer.datamodule.traj_space_height,
-                )
-                displacement = torch.norm(pred_path_unnormalized - y_path_unnormalized, dim=-1)
+                if self.trainer.datamodule.diff_as_target:
+                    true_path_diff_n = unflatten_trajectory_entity_dim(
+                        y[:, metric_detail["prefix_length"] - 1 :]
+                    )
+                    true_path_diff_un = unnormalize(
+                        true_path_diff_n,
+                        self.trainer.datamodule.diff_mean,
+                        self.trainer.datamodule.diff_std,
+                    )
+                    true_path_un = x_un[:, metric_detail["prefix_length"] - 1 :] + true_path_diff_un
+
+                else:
+                    true_path_n = unflatten_trajectory_entity_dim(
+                        y[:, metric_detail["prefix_length"] - 1 :]
+                    )
+                    true_path_un = unnormalize(
+                        true_path_n,
+                        self.trainer.datamodule.data_mean,
+                        self.trainer.datamodule.data_std,
+                    )
+
+                displacement = torch.norm(pred_path_un - true_path_un, dim=-1)
                 record[f"validation_{metric}"] = displacement.mean().item()
                 if "grouping" in metric_detail:
                     for group_name, idxs in metric_detail["grouping"].items():

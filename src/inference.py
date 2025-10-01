@@ -11,6 +11,12 @@ from transformers.generation import (
     TextStreamer,
 )
 
+from src.data_utils import (
+    flatten_trajectory_entity_dim,
+    normalize,
+    unflatten_trajectory_entity_dim,
+    unnormalize,
+)
 from src.utils import cast_floats_by_trainer_precision
 
 
@@ -130,6 +136,12 @@ def raw_decode(
     cg: bool = False,
     enable_timing=False,
     precision: str = "32-true",
+    output_diff: bool = False,
+    is_trajectory: bool = False,
+    data_mean: list[float] = [0.0, 0.0],
+    data_std: list[float] = [1.0, 1.0],
+    diff_mean: list[float] = [0.0, 0.0],
+    diff_std: list[float] = [1.0, 1.0],
     **kwargs,
 ):
     if streamer is not None:
@@ -180,15 +192,30 @@ def raw_decode(
         if enable_timing:
             start.record()
     sequences = [inputs]
-    model_inputs = cast_floats_by_trainer_precision(inputs, precision=precision)
+    last_values = inputs[:, -1:]
+    model_inputs = normalize(inputs, data_mean, data_std)
+    if is_trajectory:
+        model_inputs = flatten_trajectory_entity_dim(model_inputs)
+    model_inputs = cast_floats_by_trainer_precision(model_inputs, precision=precision)
     while inference_params.seqlen_offset < max_length - 1:
         values = get_values(model_inputs, inference_params)
         inference_params.seqlen_offset += model_inputs.shape[1]
-        model_inputs = values
-        model_inputs = cast_floats_by_trainer_precision(model_inputs, precision=precision)
+        if output_diff:
+            if is_trajectory:
+                values = unflatten_trajectory_entity_dim(values)
+            diff_un = unnormalize(values, diff_mean, diff_std)
+            last_values = last_values + diff_un
+            model_inputs = normalize(last_values, data_mean, data_std)
+        else:
+            if is_trajectory:
+                values = unflatten_trajectory_entity_dim(values)
+            last_values = unnormalize(values, data_mean, data_std)
+            model_inputs = values
         if streamer is not None:
-            streamer.put(values.cpu())
-        sequences.append(values)
+            streamer.put(last_values.cpu())
+        sequences.append(last_values)
+        model_inputs = flatten_trajectory_entity_dim(model_inputs)
+        model_inputs = cast_floats_by_trainer_precision(model_inputs, precision=precision)
     if streamer is not None:
         streamer.end()
     if torch.cuda.is_available() and enable_timing:
