@@ -129,25 +129,14 @@ def sample(logits, top_k=1, top_p=0.0, min_p=0.0, temperature=1.0):
 
 @torch.inference_mode()
 def raw_decode(
-    inputs,
+    prefix,
     model,
     max_length,
-    streamer: Optional[TextStreamer] = None,
     cg: bool = False,
     enable_timing=False,
-    precision: str = "32-true",
-    output_diff: bool = False,
-    is_trajectory: bool = False,
-    data_mean: list[float] = [0.0, 0.0],
-    data_std: list[float] = [1.0, 1.0],
-    diff_mean: list[float] = [0.0, 0.0],
-    diff_std: list[float] = [1.0, 1.0],
-    **kwargs,
+    output2input_preprocess_fn: Optional[Callable] = None,
 ):
-    if streamer is not None:
-        streamer.put(inputs.cpu())
-
-    batch_size, seqlen_og = inputs.shape[:2]
+    batch_size, seqlen_og = prefix.shape[:2]
     if cg:
         if not hasattr(model, "_decoding_cache"):
             model._decoding_cache = None
@@ -191,33 +180,19 @@ def raw_decode(
 
         if enable_timing:
             start.record()
-    sequences = [inputs]
-    last_values = inputs[:, -1:]
-    model_inputs = normalize(inputs, data_mean, data_std)
-    if is_trajectory:
-        model_inputs = flatten_trajectory_entity_dim(model_inputs)
-    model_inputs = cast_floats_by_trainer_precision(model_inputs, precision=precision)
+    inputs = prefix
+    sequences = []
     while inference_params.seqlen_offset < max_length - 1:
-        values = get_values(model_inputs, inference_params)
-        inference_params.seqlen_offset += model_inputs.shape[1]
-        if output_diff:
-            if is_trajectory:
-                values = unflatten_trajectory_entity_dim(values)
-            diff_un = unnormalize(values, diff_mean, diff_std)
-            last_values = last_values + diff_un
-            model_inputs = normalize(last_values, data_mean, data_std)
-        else:
-            if is_trajectory:
-                values = unflatten_trajectory_entity_dim(values)
-            last_values = unnormalize(values, data_mean, data_std)
-            model_inputs = values
-        if streamer is not None:
-            streamer.put(last_values.cpu())
-        sequences.append(last_values)
-        model_inputs = flatten_trajectory_entity_dim(model_inputs)
-        model_inputs = cast_floats_by_trainer_precision(model_inputs, precision=precision)
-    if streamer is not None:
-        streamer.end()
+        values = get_values(inputs, inference_params)
+        inference_params.seqlen_offset += inputs.shape[1]
+
+        inputs = (
+            values
+            if output2input_preprocess_fn is None
+            else output2input_preprocess_fn(values, prefix)
+        )
+        prefix = torch.cat([prefix, inputs], dim=1)
+        sequences.append(values)
     if torch.cuda.is_available() and enable_timing:
         end.record()
         torch.cuda.synchronize()
@@ -227,23 +202,18 @@ def raw_decode(
 
 @torch.inference_mode()
 def token_decode(
-    input_ids,
+    prefix,
     model,
     max_length,
     top_k=1,
     top_p=0.0,
     min_p=0.0,
     temperature=1.0,
-    repetition_penalty=1.0,
     eos_token_id=None,
-    teacher_outputs=None,
     vocab_size=None,
     cg=False,
     enable_timing=False,
-    output_scores=False,
-    streamer: Optional[TextStreamer] = None,
-    output2input_preprocess_fn: Optional[Callable[[Tensor], Tensor]] = None,
-    precision: str = "32-true",
+    output2input_preprocess_fn: Optional[Callable] = None,
 ):
     """Decoding, either greedy or with top-k or top-p sampling.
     If top-k = 0, don't limit the number of candidates (pure sampling).
@@ -254,17 +224,12 @@ def token_decode(
     Arguments:
         input_ids: (batch, seq_len)
         max_length: int
-        teacher_outputs (optional): (batch, seq_len). If provided, instead of sampling from the
-            logits, the next token is taken from the teacher_outputs. Useful for testing.
     Returns: GreedySearchDecoderOnlyOutput or SampleDecoderOnlyOutput, with the following fields:
         sequences: (batch, max_length)
         scores: tuples of (batch, vocab_size)
     """
-    if streamer is not None:
-        streamer.put(input_ids.cpu())
 
-    batch_size, seqlen_og = input_ids.shape
-    teacher_output_len = teacher_outputs.shape[1] if teacher_outputs is not None else 0
+    batch_size, seqlen_og = prefix.shape[:2]
     if cg:
         if not hasattr(model, "_decoding_cache"):
             model._decoding_cache = None
@@ -280,37 +245,32 @@ def token_decode(
     else:
         inference_params = InferenceParams(max_seqlen=max_length, max_batch_size=batch_size)
 
-    def get_logits(input_ids, inference_params):
+    def get_logits(inputs, inference_params):
         decoding = inference_params.seqlen_offset > 0
         if decoding:
             position_ids = torch.full(
                 (batch_size, 1),
                 inference_params.seqlen_offset,
                 dtype=torch.long,
-                device=input_ids.device,
+                device=inputs.device,
             )
         else:
             position_ids = None
         if not cg or not decoding:
             logits = model(
-                input_ids,
+                inputs,
                 position_ids=position_ids,
                 inference_params=inference_params,
                 num_last_tokens=1,
             ).logits.squeeze(dim=1)
         else:
             logits = model._decoding_cache.run(
-                input_ids, position_ids, inference_params.seqlen_offset
+                inputs, position_ids, inference_params.seqlen_offset
             ).squeeze(dim=1)
         return logits[..., :vocab_size] if vocab_size is not None else logits
 
     def sample_tokens(logits, inference_params):
-        if teacher_outputs is None or teacher_output_len <= inference_params.seqlen_offset:
-            token = sample(logits, top_k=top_k, top_p=top_p, min_p=min_p, temperature=temperature)
-        else:
-            token = teacher_outputs[:, inference_params.seqlen_offset]
-        # return rearrange(token, "b -> b 1")
-        return token.unsqueeze(1)
+        return sample(logits, top_k=top_k, top_p=top_p, min_p=min_p, temperature=temperature)
 
     def should_stop(current_token, inference_params):
         if inference_params.seqlen_offset == 0:
@@ -327,44 +287,27 @@ def token_decode(
 
         if enable_timing:
             start.record()
-    scores, sequences = [], [input_ids]
-    sequences_cat = input_ids
-    if output2input_preprocess_fn is not None:
-        model_inputs = output2input_preprocess_fn(
-            input_ids
-        )  # handle token2raw transformation if needed
-    else:
-        model_inputs = input_ids
-    model_inputs = cast_floats_by_trainer_precision(model_inputs, precision=precision)
-    while not should_stop(model_inputs, inference_params):
-        logits = get_logits(model_inputs, inference_params)
-        if output_scores:
-            scores.append(logits.clone())
-        inference_params.seqlen_offset += model_inputs.shape[1]
-        if repetition_penalty == 1.0:
-            sampled_tokens = sample_tokens(logits, inference_params)
-        else:
-            logits = modify_logit_for_repetition_penalty(logits, sequences_cat, repetition_penalty)
-            sampled_tokens = sample_tokens(logits, inference_params)
-            sequences_cat = torch.cat([sequences_cat, sampled_tokens], dim=1)
+    sequences = []
+    sampled_tokens = None
+    inputs = prefix
+    while not should_stop(sampled_tokens, inference_params):
+        logits = get_logits(inputs, inference_params)
+        inference_params.seqlen_offset += inputs.shape[1]
+        sampled_tokens = sample_tokens(logits, inference_params).unsqueeze(
+            1
+        )  # get_logits collapses the time dim
         sequences.append(sampled_tokens)
-
-        model_inputs = (
-            output2input_preprocess_fn(sampled_tokens)
+        inputs = (
+            output2input_preprocess_fn(sampled_tokens, prefix=prefix)
             if output2input_preprocess_fn is not None
             else sampled_tokens
         )
-        model_inputs = cast_floats_by_trainer_precision(model_inputs, precision=precision)
-        if streamer is not None:
-            streamer.put(sampled_tokens.cpu())
-    if streamer is not None:
-        streamer.end()
+        prefix = torch.cat([prefix, inputs], dim=1)
     if torch.cuda.is_available() and enable_timing:
         end.record()
         torch.cuda.synchronize()
         print(f"Prompt processing + decoding time: {(start.elapsed_time(end)):.0f}ms")
-    output_cls = GreedySearchDecoderOnlyOutput if top_k == 1 else SampleDecoderOnlyOutput
-    return output_cls(sequences=torch.cat(sequences, dim=1), scores=tuple(scores))
+    return torch.cat(sequences, dim=1)
 
 
 class CustomGenerationMixin:
@@ -372,9 +315,9 @@ class CustomGenerationMixin:
         raise NotImplementedError
 
     def generate(self, *args, **kwargs):
-        if self.output_type == "logits":
+        if self.output_type == "logit":
             return self.token_generate(*args, **kwargs)
-        elif self.output_type == "values":
+        elif self.output_type == "value":
             return self.raw_generate(*args, **kwargs)
 
     def raw_generate(self, inputs, max_length, **kwargs):
@@ -394,8 +337,6 @@ class CustomGenerationMixin:
         top_p=0.0,
         min_p=0.0,
         temperature=1.0,
-        return_dict_in_generate=False,
-        output_scores=False,
         **kwargs,
     ):
         output = token_decode(
@@ -406,12 +347,9 @@ class CustomGenerationMixin:
             top_p=top_p,
             min_p=min_p,
             temperature=temperature,
-            output_scores=output_scores,
             **kwargs,
         )
-        if not output_scores:
-            output.scores = None
-        return output if return_dict_in_generate else output.sequences
+        return output
 
 
 @torch.inference_mode()

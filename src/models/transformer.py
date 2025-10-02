@@ -28,21 +28,24 @@ class TransformerModel(nn.Module, CustomGenerationMixin):
         use_rope: bool = True,
         theta: float = 10000.0,
         input_type: str = "token",
-        output_type: str = "logits",
+        output_type: str = "logit",
         vocab_size: int | None = None,
         out_value_size: int | None = None,
         input_value_size: int | None = None,
         n_encoder_layer: int | None = None,
+        split_count: int = 0,
+        split_dim: int | None = None,
         device: str = None,
     ):
         super().__init__()
         self.input_type = input_type
         self.output_type = output_type
+        self.split_count = split_count
 
         # sanity check on args compatibility to input_type and output_type
-        if self.input_type == "token" or self.output_type == "logits":
+        if self.input_type == "token" or self.output_type == "logit":
             assert vocab_size is not None
-        if self.output_type == "values":
+        if self.output_type == "value":
             assert out_value_size is not None
 
         if self.input_type == "token":
@@ -80,8 +83,15 @@ class TransformerModel(nn.Module, CustomGenerationMixin):
             ]
         )
         self.ln_final = RMSNorm(d_model)
+        if self.split_count > 1:
+            self.split_head = nn.Sequential(
+                nn.Linear(d_model, split_count * split_dim, bias=False),
+                nn.GELU(),
+            )
         self.lm_head = nn.Linear(
-            d_model, vocab_size if self.output_type == "logits" else out_value_size, bias=False
+            d_model if self.split_count <= 1 else split_dim,
+            vocab_size if self.output_type == "logit" else out_value_size,
+            bias=False,
         )
 
     def forward(
@@ -103,12 +113,15 @@ class TransformerModel(nn.Module, CustomGenerationMixin):
             x = x[:, -num_last_tokens:]
 
         x = self.ln_final(x)
+        if self.split_count > 1:
+            x = self.split_head(x)
+            x = einops.rearrange(x, "... (n d) -> ... n d", n=self.split_count)
         x = self.lm_head(x)
 
-        if self.output_type == "logits":
+        if self.output_type == "logit":
             CausalOutput = namedtuple("CausalOutput", ["logits"])
             return CausalOutput(logits=x)
-        elif self.output_type == "values":
+        elif self.output_type == "value":
             CausalOutput = namedtuple("CausalOutput", ["values"])
             return CausalOutput(values=x)
 

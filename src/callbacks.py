@@ -5,6 +5,11 @@ import pytorch_lightning as pl
 import torch
 import wandb
 
+from src.data_utils import (
+    reverse_discretize_trajectory,
+    unflatten_trajectory_entity_dim,
+    unnormalize,
+)
 from src.utils import (
     bw_to_rgb,
     create_frames_from_trajectory,
@@ -36,8 +41,8 @@ class ImagePrefixSamplerCallback(pl.Callback):
 
         sample_loader = trainer.val_dataloaders
         batch = next(iter(sample_loader))
-        x = batch[0][: self.num_samples]
-        examples = x.clone().cpu().numpy()
+        batch = batch[0][: self.num_samples]
+        examples = batch.clone().cpu().numpy()
 
         examples = unflatten_images(examples, shape=(28, 28))
         examples = bw_to_rgb(examples)
@@ -45,18 +50,21 @@ class ImagePrefixSamplerCallback(pl.Callback):
         wandb.log({"examples": examples}, commit=False)
 
         # pad dummy start of sequence
-        x = trainer.datamodule.pad_start_of_sequence(x)
-        x = x[:, : self.sample_prefix_length].to(pl_module.device)
-        samples = pl_module.model.generate(
-            x,
-            max_length=self.max_length,
+        batch = batch.to(pl_module.device)
+        sample_prefix = batch[:, : self.sample_prefix_length]
+        x, _ = pl_module.make_model_inputs_and_targets(batch)
+        x_prefix = x[:, : self.sample_prefix_length + 1]
+        pred = pl_module.model.generate(
+            x_prefix,
+            max_length=self.max_length + 1,
             top_k=self.top_k,
             eos_token_id=-1,
-            output2input_preprocess_fn=pl_module.output2input_preprocess_fn,
-            precision=trainer.precision,
+            output2input_preprocess_fn=pl_module.model_output2input_preprocess,
         )
-        # trim dummy start of sequence
-        samples = samples[:, 1:].cpu().numpy()
+        if pl_module.hparams.task.target_type == "value":
+            pred = pred.int8().squeeze(-1)
+
+        samples = torch.cat([sample_prefix, pred], dim=1).cpu().numpy()
         samples = unflatten_images(samples, shape=(28, 28))
         samples = bw_to_rgb(samples)
         samples = [wandb.Image(sample) for sample in samples]
@@ -129,10 +137,10 @@ class TrajectoryPrefixSamplerCallback(pl.Callback):
 
         sample_loader = trainer.val_dataloaders
         batch = next(iter(sample_loader))
-        x = batch[: self.num_samples]
+        batch = batch[: self.num_samples]
 
         if epoch == 0:
-            examples = x.clone().cpu().numpy()
+            examples = batch.clone().cpu().numpy()
             example_videos = []
             for i, example in enumerate(examples):
                 example = example[:: self.downsampling_ratio]
@@ -142,27 +150,34 @@ class TrajectoryPrefixSamplerCallback(pl.Callback):
                 example_videos.append(wandb.Video(video_path, format="mp4"))
             wandb.log({"examples": example_videos}, commit=False)
 
-        x = x[:, : self.sample_prefix_length].to(pl_module.device)
-        samples = pl_module.model.generate(
-            x,
+        batch = batch.to(pl_module.device)
+        sample_prefix = batch[:, : self.sample_prefix_length]
+        x, _ = pl_module.make_model_inputs_and_targets(batch)
+        x_prefix = x[:, : self.sample_prefix_length]
+        output = pl_module.model.generate(
+            x_prefix,
             max_length=self.max_length,
-            precision=trainer.precision,
-            is_trajectory=True,
-            output_diff=getattr(trainer.datamodule, "diff_as_target", False),
-            data_mean=trainer.datamodule.data_mean,
-            data_std=trainer.datamodule.data_std,
-            diff_mean=(
-                trainer.datamodule.diff_mean
-                if getattr(trainer.datamodule, "diff_as_target", False)
-                else None
-            ),
-            diff_std=(
-                trainer.datamodule.diff_std
-                if getattr(trainer.datamodule, "diff_as_target", False)
-                else None
-            ),
+            output2input_preprocess_fn=pl_module.model_output2input_preprocess,
         )
-        samples = samples.cpu().numpy()
+        if pl_module.hparams.task.target_type == "token":
+            pred = reverse_discretize_trajectory(
+                output,
+                pl_module.space_width_partition_gap,
+                pl_module.space_height_partition_gap,
+                pl_module.space_width_partition_bias,
+                pl_module.space_height_partition_bias,
+                pl_module.hparams.task.space_width_partition_count,
+                pl_module.hparams.task.space_height_partition_count,
+            )
+        elif pl_module.hparams.task.diff_as_target:
+            diff = unflatten_trajectory_entity_dim(output)
+            diff_un = unnormalize(diff, pl_module.diff_mean, pl_module.diff_std)
+            pred = sample_prefix[:, -1:] + diff_un
+        else:
+            pred = unflatten_trajectory_entity_dim(output)
+            pred = unnormalize(pred, pl_module.data_mean, pl_module.data_std)
+
+        samples = torch.cat([sample_prefix, pred], dim=1).cpu().numpy()
         sample_videos = []
         for i, sample in enumerate(samples):
             sample = sample[:: self.downsampling_ratio]

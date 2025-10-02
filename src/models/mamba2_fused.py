@@ -42,9 +42,9 @@ class Mamba2MixerModel(nn.Module, CustomGenerationMixin):
         self.output_type = output_type
 
         # sanity check on args compatibility to input_type and output_type
-        if self.input_type == "token" or self.output_type == "logits":
+        if self.input_type == "token" or self.output_type == "logit":
             assert vocab_size is not None
-        if self.output_type == "values":
+        if self.output_type == "value":
             assert out_value_size is not None
 
         if self.input_type == "token":
@@ -58,7 +58,7 @@ class Mamba2MixerModel(nn.Module, CustomGenerationMixin):
                 input_value_size is not None
             ), "input_value_size must be provided for raw input type"
             encoder_layers = [nn.Linear(input_value_size, d_model, **factory_kwargs)]
-            for _ in range(n_encoder_layer - 1):
+            for _ in range(n_encoder_layer):
                 encoder_layers.append(
                     nn.Sequential(
                         nn.GELU(),
@@ -146,9 +146,9 @@ class Mamba2MixerModel(nn.Module, CustomGenerationMixin):
         if num_last_tokens > 0:
             hidden_states = hidden_states[:, -num_last_tokens:]
         outputs = self.head(hidden_states)
-        if self.output_type == "logits":
+        if self.output_type == "logit":
             CausalOutput = namedtuple("CausalOutput", ["logits"])
             return CausalOutput(logits=outputs)
-        elif self.output_type == "values":
+        elif self.output_type == "value":
             CausalOutput = namedtuple("CausalOutput", ["values"])
             return CausalOutput(values=outputs)

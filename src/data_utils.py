@@ -144,3 +144,38 @@ def flatten_trajectory_entity_dim(x: torch.Tensor):
 
 def unflatten_trajectory_entity_dim(x: torch.Tensor):
     return x.reshape((*x.shape[:-1], -1, 2))
+
+
+def discretize_trajectory(
+    x: torch.Tensor,
+    space_width_partition_gap: float,
+    space_height_partition_gap: float,
+    space_width_partition_bias: float,
+    space_height_partition_bias: float,
+    space_width_partition_count: int,
+    space_height_partition_count: int,
+):
+    x = x.clone()
+    x = x // torch.tensor([space_width_partition_gap, space_height_partition_gap])
+    x_id = x[..., 0] * space_height_partition_count + x[..., 1]
+    x = x * torch.tensor([space_width_partition_gap, space_height_partition_gap]) + torch.tensor(
+        [space_width_partition_bias, space_height_partition_bias]
+    )
+    return x, x_id
+
+
+def reverse_discretize_trajectory(
+    x: torch.Tensor,
+    space_width_partition_gap: float,
+    space_height_partition_gap: float,
+    space_width_partition_bias: float,
+    space_height_partition_bias: float,
+    space_width_partition_count: int,
+    space_height_partition_count: int,
+):
+    width_id = x // space_height_partition_count
+    height_id = x % space_height_partition_count
+    width = space_width_partition_bias + space_width_partition_gap * width_id
+    height = space_height_partition_bias + space_height_partition_gap * height_id
+    x = torch.stack([width, height], dim=-1).to(x.dtype)
+    return x

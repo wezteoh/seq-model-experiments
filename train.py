@@ -13,262 +13,8 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import OneCycleLR
 
 import src.callbacks
-from src.data import get_data_module_class, get_output2input_preprocess_fn
-from src.data_utils import unflatten_trajectory_entity_dim, unnormalize
-from src.models import get_model
-
-
-class SequenceLightningModule(pl.LightningModule):
-    def __init__(self, config):
-        super().__init__()
-        self.save_hyperparameters(config, logger=True)
-
-        self.model = get_model(
-            name=self.hparams.model.name,
-            args=self.hparams.model.args,
-            device="cuda" if config.trainer.accelerator == "gpu" else "cpu",
-        )
-        self.output2input_preprocess_fn = get_output2input_preprocess_fn(
-            self.hparams.output2input_preprocess_fn_name
-        )
-
-    def loss(self, pred, y, **w):
-        if self.hparams["loss"] == "cross_entropy":
-            output = pred.logits
-            output = output.reshape(-1, output.shape[-1])
-            y = y.reshape(-1).long()
-            loss = F.cross_entropy(output, y, ignore_index=-100)
-        elif self.hparams["loss"] == "mse":
-            output = pred.values
-            if self.hparams.trainer.accelerator == "cpu":
-                loss = F.mse_loss(output.float(), y.float())
-            else:
-                loss = F.mse_loss(output, y)
-        return loss
-
-    def forward(self, batch):
-        """Passes a batch through the encoder, backbone, and decoder"""
-        x, y = batch
-
-        if self.hparams.model.args.input_type == "raw":
-            assert len(x.shape) == 3  # B,T,C
-        elif self.hparams.model.args.input_type == "token":
-            assert len(x.shape) == 2  # B,T
-
-        pred = self.model.forward(x)
-
-        return x, y, pred
-
-    def training_step(self, batch, batch_idx):
-        x, y, pred = self.forward(batch)
-        loss = self.loss(pred, y)
-
-        # Log the loss explicitly so it shows up in WandB
-        # Note that this currently runs into a bug in the progress bar with ddp (as of 1.4.6)
-        # https://github.com/PyTorchLightning/pytorch-lightning/pull/9142
-        # We additionally log the epochs under 'trainer' to get a consistent prefix with 'global_step'
-        record_step = {}
-        for metric in self.hparams.metrics:
-            if metric == "loss":
-                record_step[f"trainer_{metric}"] = loss.item()
-
-        self.log_dict(
-            record_step,
-            on_step=True,
-            on_epoch=True,
-            prog_bar=True,
-            logger=True,
-            add_dataloader_idx=False,
-            # sync_dist=True,
-        )
-
-        return loss
-
-    def validation_step(self, batch, batch_idx, dataloader_idx=0):
-        x, y, pred = self.forward(batch)
-        loss = self.loss(pred, y)
-
-        record = {}
-        for metric, metric_detail in self.hparams.metrics.items():
-            if metric == "loss":
-                record[f"validation_{metric}"] = loss.item()
-            elif self.hparams.model.args.output_type == "logits" and metric == "accuracy":
-                pred_class = pred.logits.argmax(dim=-1)
-                record[f"validation_{metric}"] = (pred_class == y).float().mean().item()
-            elif self.hparams.model.args.output_type == "values" and metric == "ade":
-                assert metric_detail["prefix_length"] > 0
-                x_un = unnormalize(
-                    unflatten_trajectory_entity_dim(x),
-                    self.trainer.datamodule.data_mean,
-                    self.trainer.datamodule.data_std,
-                )
-                x_prefix_un = x_un[:, : metric_detail["prefix_length"]]
-                output = self.model.generate(
-                    x_prefix_un,
-                    max_length=y.shape[1] + 1,
-                    precision=self.trainer.precision,
-                    is_trajectory=getattr(self.trainer.datamodule, "is_trajectory", False),
-                    output_diff=getattr(self.trainer.datamodule, "diff_as_target", False),
-                    data_mean=(
-                        self.trainer.datamodule.data_mean
-                        if getattr(self.trainer.datamodule, "normalize", False)
-                        else None
-                    ),
-                    data_std=(
-                        self.trainer.datamodule.data_std
-                        if getattr(self.trainer.datamodule, "normalize", False)
-                        else None
-                    ),
-                    diff_mean=(
-                        self.trainer.datamodule.diff_mean
-                        if getattr(self.trainer.datamodule, "normalize", False)
-                        and getattr(self.trainer.datamodule, "diff_as_target", False)
-                        else None
-                    ),
-                    diff_std=(
-                        self.trainer.datamodule.diff_std
-                        if getattr(self.trainer.datamodule, "normalize", False)
-                        and getattr(self.trainer.datamodule, "diff_as_target", False)
-                        else None
-                    ),
-                )
-                pred_path_un = output[:, metric_detail["prefix_length"] :]
-
-                if self.trainer.datamodule.diff_as_target:
-                    true_path_diff_n = unflatten_trajectory_entity_dim(
-                        y[:, metric_detail["prefix_length"] - 1 :]
-                    )
-                    true_path_diff_un = unnormalize(
-                        true_path_diff_n,
-                        self.trainer.datamodule.diff_mean,
-                        self.trainer.datamodule.diff_std,
-                    )
-                    true_path_un = x_un[:, metric_detail["prefix_length"] - 1 :] + true_path_diff_un
-
-                else:
-                    true_path_n = unflatten_trajectory_entity_dim(
-                        y[:, metric_detail["prefix_length"] - 1 :]
-                    )
-                    true_path_un = unnormalize(
-                        true_path_n,
-                        self.trainer.datamodule.data_mean,
-                        self.trainer.datamodule.data_std,
-                    )
-
-                displacement = torch.norm(pred_path_un - true_path_un, dim=-1)
-                record[f"validation_{metric}"] = displacement.mean().item()
-                if "grouping" in metric_detail:
-                    for group_name, idxs in metric_detail["grouping"].items():
-                        record[f"validation_{metric}_{group_name}"] = (
-                            displacement[..., idxs].mean().item()
-                        )
-
-        self.log_dict(
-            record,
-            on_step=False,
-            on_epoch=True,
-            prog_bar=True,
-            logger=True,
-            add_dataloader_idx=False,
-            # sync_dist=True,
-        )
-        return loss
-
-    def test_step(self, batch, batch_idx, dataloader_idx=0):
-        x, y, pred = self.forward(batch)
-        loss = self.loss(pred, y)
-        record = {"test/loss": loss}
-
-        if self.hparams["task_type"] == "classification":
-            pred_class = pred.logits.argmax(dim=-1)
-            record["test_acc"] = (pred_class == y).float().mean()
-
-        self.log_dict(
-            record,
-            on_step=False,
-            on_epoch=True,
-            prog_bar=True,
-            logger=True,
-            add_dataloader_idx=False,
-            # sync_dist=True,
-        )
-
-        return loss
-
-    def configure_optimizers(
-        self,
-    ):
-        lr = self.hparams.lr
-        weight_decay = self.hparams.weight_decay
-
-        # All parameters in the model
-        all_parameters = list(self.model.parameters())
-
-        # General parameters don't contain the special _optim key
-        params = [p for p in all_parameters if not hasattr(p, "_optim")]
-
-        # Create an optimizer with the general parameters
-        optimizer = AdamW(
-            params,
-            lr=lr,
-            weight_decay=weight_decay,
-            betas=(self.hparams.get("beta1", 0.9), self.hparams.get("beta2", 0.95)),
-        )
-
-        # Add parameters with special hyperparameters
-        hps = [getattr(p, "_optim") for p in all_parameters if hasattr(p, "_optim")]
-        hps = [
-            dict(s) for s in sorted(list(dict.fromkeys(frozenset(hp.items()) for hp in hps)))
-        ]  # Unique dicts
-        for hp in hps:
-            params = [p for p in all_parameters if getattr(p, "_optim", None) == hp]
-            optimizer.add_param_group({"params": params, **hp})
-
-        # Print optimizer info
-        keys = sorted(set([k for hp in hps for k in hp.keys()]))
-        for i, g in enumerate(optimizer.param_groups):
-            group_hps = {k: g.get(k, None) for k in keys}
-            print(
-                " | ".join(
-                    [
-                        f"Optimizer group {i}",
-                        f"{len(g['params'])} tensors",
-                    ]
-                    + [f"{k} {v}" for k, v in group_hps.items()]
-                )
-            )
-        # Create a lr scheduler
-        # scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=patience, factor=0.2)
-        if self.hparams.lr_schedule:
-            total_steps = self.hparams.total_steps or getattr(
-                self.trainer, "estimated_stepping_batches", None
-            )
-            if total_steps is None:
-                raise ValueError(
-                    "total_steps not set. Pass total_steps=... to the module "
-                    "or let Lightning set trainer.estimated_stepping_batches by calling trainer.fit first."
-                )
-            max_lrs = [g.get("lr", lr) for g in optimizer.param_groups]
-            scheduler = OneCycleLR(
-                optimizer,
-                max_lr=max_lrs,
-                total_steps=total_steps,
-                pct_start=self.hparams.pct_start,
-                anneal_strategy="cos",
-                cycle_momentum=False,
-                div_factor=self.hparams.get("div_factor", 25.0),
-                final_div_factor=self.hparams.get("final_div_factor", 10000.0),
-            )
-            return {
-                "optimizer": optimizer,
-                "lr_scheduler": {
-                    "scheduler": scheduler,
-                    "interval": "step",  # OneCycleLR updates every step
-                    "frequency": 1,
-                },
-            }
-        else:
-            return optimizer
+import src.data
+import src.tasks
 
 
 def create_trainer(config):
@@ -342,55 +88,28 @@ def train(config):
     if config.train.seed is not None:
         pl.seed_everything(config.train.seed, workers=True)
     trainer = create_trainer(config)
-    wrapper_model = SequenceLightningModule(config)
-    summary = summarize(wrapper_model, max_depth=2)
+    task = getattr(src.tasks, config.task.pop("name"))(config)
+    summary = summarize(task, max_depth=2)
     print(summary)
     print(f"Total parameters: {summary.total_parameters}")
     print(f"Trainable parameters: {summary.trainable_parameters}")
 
-    for name, p in wrapper_model.model.named_parameters():
+    for name, p in task.model.named_parameters():
         print(f"{name:55s} shape={tuple(p.shape)}  requires_grad={p.requires_grad}")
 
-    data_module_class = get_data_module_class(config.dataset.pop("name"))
-    data_module = data_module_class(**config.dataset)
-    assert (
-        config.task_type == data_module_class.SUPPORTED_TASK_TYPE
-    ), f"Task type {config.task_type} not supported for dataset {config.dataset}"
-
-    # Load pretrained_model if specified, UNTESTED
-    if config.train.get("pretrained_model_path", None) is not None:
-        # PTL style.  Note, method returns a new model object, and need to pass config.
-        pretrained_model = SequenceLightningModule.load_from_checkpoint(
-            config.train.pretrained_model_path,
-            config=config,
-            strict=config.train.pretrained_model_strict_load,
-        )
-        print("Loaded pretrained model from", config.train.pretrained_model_path)
-
-        if config.train.get("ignore_pretrained_layers", False):
-            pretrained_dict = pretrained_model.state_dict()
-            model_dict = wrapper_model.state_dict()
-            for k, v in model_dict.items():
-                for ignore_layer in config.train.ignore_pretrained_layers:
-                    if ignore_layer in k:
-                        pretrained_dict[k] = v
-            wrapper_model.load_state_dict(pretrained_dict)
-        if config.train.get("pretrained_freeze_encoder", False):
-            for name, param in wrapper_model.named_parameters():
-                if not ("decoder" in name):
-                    param.requires_grad = False
+    data_module = getattr(src.data, config.dataset.pop("name"))(**config.dataset)
 
     # Run initial validation epoch (useful for debugging, finetuning)
     if config.train.validate_at_start:
         print("Running validation before training")
-        trainer.validate(wrapper_model, datamodule=data_module)
+        trainer.validate(task, datamodule=data_module)
 
     if config.train.ckpt is not None:
-        trainer.fit(wrapper_model, ckpt_path=config.train.ckpt, datamodule=data_module)
+        trainer.fit(task, ckpt_path=config.train.ckpt, datamodule=data_module)
     else:
-        trainer.fit(wrapper_model, datamodule=data_module)
+        trainer.fit(task, datamodule=data_module)
     if config.train.test:
-        trainer.test(wrapper_model, datamodule=data_module)
+        trainer.test(task, datamodule=data_module)
 
 
 @hydra.main(config_path="configs", config_name="config.yaml")
@@ -398,32 +117,11 @@ def main(cfg: DictConfig) -> None:
     print(OmegaConf.to_yaml(cfg))
     OmegaConf.set_struct(cfg, False)  # Allow writing keys
 
-    # sanity checks on task_type, loss, data config compatibility
-    if cfg.task_type == "classification":
-        assert cfg.loss == "cross_entropy"
-    elif cfg.task_type == "generation":
-        assert cfg.loss in ["mse", "cross_entropy"]
-
-    # sanity check on loss, output_type, target_type compatibility
-    if cfg.loss == "cross_entropy":
-        assert cfg.model.args.output_type == "logits"
-        assert cfg.dataset.target_type == "token"
-    elif cfg.loss == "mse":
-        assert cfg.model.args.output_type == "values"
-        assert cfg.dataset.target_type == "raw"
-
-    # check model input/output types and dataset input/target types are compatible
-    assert cfg.model.args.input_type == cfg.dataset.input_type
-    if cfg.model.args.output_type == "logits":
-        assert cfg.dataset.target_type == "token"
-    elif cfg.model.args.output_type == "values":
-        assert cfg.dataset.target_type == "raw"
-
-    # check preprocessing exists if output and input types are incompatible
-    if (cfg.model.args.output_type == "logits" and cfg.model.args.input_type == "raw") or (
-        cfg.model.args.output_type == "values" and cfg.model.args.input_type == "token"
-    ):
-        assert cfg.output2input_preprocess_fn_name is not None
+    # sanity check on loss, target_type compatibility
+    if cfg.task.loss == "cross_entropy":
+        assert cfg.task.target_type == "token"
+    elif cfg.task.loss == "mse":
+        assert cfg.task.target_type == "value"
 
     # Track with wandb
     wandb_cfg = cfg["wandb"]

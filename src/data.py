@@ -16,33 +16,13 @@ from src.data_utils import (
     flatten_trajectory_entity_dim,
     generate_induction_head,
     normalize,
+    unflatten_trajectory_entity_dim,
+    unnormalize,
 )
 from src.utils import cast_floats_by_trainer_precision
 
 
-def get_output2input_preprocess_fn(preprocess_fn_name):
-    if preprocess_fn_name is None:
-        return None
-    if preprocess_fn_name == "mnist_token2raw":
-        return MNISTSequenceGenerationDataModule.token2raw
-    raise ValueError(f"Preprocess function {preprocess_fn_name} not supported")
-
-
-def get_data_module_class(dataset_name):
-    if dataset_name == "mnist_generation":
-        return MNISTSequenceGenerationDataModule
-    if dataset_name in ("icl"):
-        return ICLDataModule
-    if dataset_name == "trajectory_generation":
-        return TrajectoryDataModule
-    raise ValueError(f"Dataset {dataset_name} not supported")
-
-
 class MNISTSequenceGenerationDataModule(pl.LightningDataModule):
-
-    # class variables, to allow model to access outside of training
-    SUPPORTED_TASK_TYPE = "generation"
-
     @classmethod
     def token2raw(cls, x):
         return x.unsqueeze(-1).float() / 255.0
@@ -93,20 +73,8 @@ class MNISTSequenceGenerationDataModule(pl.LightningDataModule):
             )
 
     def on_after_batch_transfer(self, batch, dataloader_idx: int):
-
         x, _ = batch
-        y = x.clone()
-        # slide x one step back
-        x = self.__class__.pad_start_of_sequence(x)[:, :-1]
-
-        if self.input_type == "raw":
-            x = self.__class__.token2raw(x)
-        if self.target_type == "raw":
-            y = self.__class__.token2raw(y)
-
-        x = cast_floats_by_trainer_precision(x, precision=self.trainer.precision)
-        y = cast_floats_by_trainer_precision(y, precision=self.trainer.precision)
-        return x, y
+        return x
 
     def train_dataloader(self):
         return DataLoader(
@@ -144,7 +112,6 @@ class MNISTSequenceGenerationDataModule(pl.LightningDataModule):
 
 class ICLDataModule(pl.LightningDataModule):
     _name_ = "icl"
-    SUPPORTED_TASK_TYPE = "generation"
 
     def __init__(
         self,
@@ -356,32 +323,16 @@ class ICLDataModule(pl.LightningDataModule):
 
 
 class TrajectoryDataModule(pl.LightningDataModule):
-    SUPPORTED_TASK_TYPE = "generation"
-    is_trajectory = True
-    normalize = True
-
     def __init__(
         self,
         data_dir: str = None,
         bsz: int = 32,
         num_workers: int = 4,
-        data_mean: list[float] = [0.0, 0.0],
-        data_std: list[float] = [1.0, 1.0],
-        diff_mean: list[float] = [0.0, 0.0],
-        diff_std: list[float] = [1.0, 1.0],
-        input_type: Literal["raw"] = "raw",
-        target_type: Literal["raw"] = "raw",
-        diff_as_target: bool = False,
     ):
         super().__init__()
         self.data_dir = Path(os.path.expanduser(data_dir))
         self.bsz = bsz
         self.num_workers = num_workers
-        self.data_mean = torch.tensor(data_mean)
-        self.data_std = torch.tensor(data_std)
-        self.diff_mean = torch.tensor(diff_mean)
-        self.diff_std = torch.tensor(diff_std)
-        self.diff_as_target = diff_as_target
 
     def prepare_data(self):
         pass
@@ -412,28 +363,3 @@ class TrajectoryDataModule(pl.LightningDataModule):
             pin_memory=True,
             persistent_workers=self.num_workers > 0,
         )
-
-    def on_after_batch_transfer(self, batch, dataloader_idx: int):
-        if self.data_mean.device != batch.device:
-            self.data_mean = self.data_mean.to(batch.device)
-            self.data_std = self.data_std.to(batch.device)
-            if self.diff_as_target:
-                self.diff_mean = self.diff_mean.to(batch.device)
-                self.diff_std = self.diff_std.to(batch.device)
-
-        x = normalize(batch, self.data_mean, self.data_std)
-        x = flatten_trajectory_entity_dim(x)
-        if self.diff_as_target:
-            y = torch.diff(batch, dim=1)
-            y = normalize(y, self.diff_mean, self.diff_std)
-            y = flatten_trajectory_entity_dim(y)
-        else:
-            y = x.clone()
-            y = x[:, 1:]
-
-        # slide x one step back
-        x = x[:, :-1]
-
-        x = cast_floats_by_trainer_precision(x, precision=self.trainer.precision)
-        y = cast_floats_by_trainer_precision(y, precision=self.trainer.precision)
-        return x, y

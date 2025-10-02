@@ -1,4 +1,8 @@
 # Minimal, fast debug run on CPU
+wandb:
+  project: transformer-mnist
+  name: dryrun
+
 train:
   seed: 0
   validate_at_start: true
@@ -6,46 +10,11 @@ train:
   ckpt: null
   ckpt_dir: ~/ckpt
 
-dataset:
-  name: mnist_generation
-  bsz: 8
-  num_workers: 0
-  data_dir: ~/data
-  input_type: raw
-  target_type: token
-
-# Small model for speed (used by CPU class after the code tweak below)
-model:
-  name: transformer
-  args:
-    context_length: 785
-    num_layers: 4
-    d_model: 128
-    num_heads: 4
-    d_ff: 256
-    use_rope: True
-    theta: 10000.0
-    input_type: raw
-    output_type: logits
-    vocab_size: 256
-
-metrics: ["loss", "accuracy"]
-
-# Optimizer
-lr: 0.001
-weight_decay: 0.01
-lr_schedule: false
-pct_start: 0.1
-total_steps: null
-task_type: generation
-loss: cross_entropy
-output2input_preprocess_fn_name: mnist_token2raw
-
 # Lightning Trainer
 trainer:
   accelerator: cpu
   devices: 1
-  precision: 32
+  precision: bf16-true
   max_epochs: 1
   fast_dev_run: true           # one batch train/val/test and exit
   limit_train_batches: 2       # safety; only a couple batches
@@ -54,12 +23,54 @@ trainer:
   log_every_n_steps: 1
   enable_checkpointing: false
 
-wandb:
-  project: transformer-mnist
-  name: dryrun
+task:
+  name: MNISTGenerationTask
+  target_type: token
+  input_type: value
+  loss: cross_entropy
+  data_mean: 0.0
+  data_std: 1.0
+
+dataset:
+  name: MNISTSequenceGenerationDataModule
+  bsz: 8
+  num_workers: 0
+  data_dir: ~/data
+
+metrics:
+  loss: null
+  accuracy: null
+
+# Small model for speed (used by CPU class after the code tweak below)
+model:
+  name: transformer
+  args:
+    context_length: 785 # include padded prefix
+    n_layer: 4
+    d_model: 128
+    n_head: 4
+    d_ff: 256
+    use_rope: True
+    theta: 10000.0
+    input_type: value
+    output_type: logit
+    vocab_size: 256
+    n_encoder_layer: 1
+    input_value_size: 1
+
+# Optimizer
+optimizer:
+  lr: 0.001
+  weight_decay: 0.01
+  lr_schedule:
+    div_factor: 15
+    final_div_factor: 500
+    pct_start: 0.1
+    total_steps: null
+
 callbacks:
   ImagePrefixSamplerCallback:
     num_samples: 4
     every_n_epochs: 1
-    sample_prefix_length: 257
-    max_length: 785
+    sample_prefix_length: 256
+    max_length: 784
