@@ -1,0 +1,97 @@
+# Minimal, fast debug run on CPU
+wandb:
+  project: transformer-traj
+  name: token-2.3mparams-schedule
+
+train:
+  seed: 0
+  validate_at_start: true
+  test: false
+  ckpt: null
+  ckpt_dir: ~/ckpt
+
+# Lightning Trainer
+trainer:
+  accelerator: gpu
+  devices: 1
+  precision: bf16-true
+  max_epochs: 100
+  fast_dev_run: false           # one batch train/val/test and exit
+  limit_train_batches: null       # safety; only a couple batches
+  limit_val_batches: null
+  limit_test_batches: null
+  log_every_n_steps: 1
+  enable_checkpointing: True
+  gradient_clip_val: 1.0
+  gradient_clip_algorithm: norm
+
+task:
+  name: TrajectoryGenerationTask
+  target_type: token
+  input_type: value
+  diff_as_target: false
+  data_mean: [47.0, 25.0]
+  data_std: [47.0, 25.0]
+  # diff_mean: [0.0, 0.0]
+  # diff_std: [0.75, 0.75]
+  loss: cross_entropy
+  space_width: 94.0
+  space_height: 50.0
+  space_width_partition_count: 94
+  space_height_partition_count: 50
+
+dataset:
+  name: TrajectoryDataModule
+  bsz: 512
+  num_workers: 0
+  data_dir: ~/data/traj/basketball
+
+metrics:
+  loss: null
+  ade: # if idxs given, additionally log stratified metric for each group
+    prefix_length: 30
+    grouping:
+      ball: [0]
+      player_team_a: [1, 2, 3, 4, 5]
+      player_team_b: [6, 7, 8, 9, 10]
+
+# Small model for speed (used by CPU class after the code tweak below)
+model:
+  name: transformer
+  args:
+    context_length: 49
+    n_layer: 8
+    d_model: 128
+    n_head: 8
+    d_ff: 512
+    use_rope: True
+    theta: 10000.0
+    input_type: value
+    output_type: logit
+    # out_value_size: 22
+    vocab_size: 4700
+    n_encoder_layer: 2
+    input_value_size: 22
+    split_count: 11
+    split_dim: 32
+
+# Optimizer
+optimizer:
+  lr: 0.001
+  weight_decay: 0.01
+  lr_schedule:
+    div_factor: 15
+    final_div_factor: 500
+    pct_start: 0.1
+    total_steps: null
+
+callbacks:
+  TrajectoryPrefixSamplerCallback:
+    num_samples: 4
+    every_n_epochs: 5
+    sample_prefix_length: 25
+    max_length: 50
+    downsampling_ratio: 1
+    fps: 5
+    game: basketball
+    sample_dir: ~/samples

@@ -142,7 +142,7 @@ def flatten_trajectory_entity_dim(x: torch.Tensor):
     return x.flatten(start_dim=-2)
 
 
-def unflatten_trajectory_entity_dim(x: torch.Tensor):
+def unflatten_trajectory_entity_dim(x: torch.Tensor, entity_dim: int = 2):
     return x.reshape((*x.shape[:-1], -1, 2))
 
 
@@ -156,11 +156,13 @@ def discretize_trajectory(
     space_height_partition_count: int,
 ):
     x = x.clone()
-    x = x // torch.tensor([space_width_partition_gap, space_height_partition_gap])
+    gap = torch.tensor([space_width_partition_gap, space_height_partition_gap]).to(x.device)
+    bias = torch.tensor([space_width_partition_bias, space_height_partition_bias]).to(x.device)
+    x = x // gap
+    x[..., 0] = torch.clamp(x[..., 0], min=0, max=space_width_partition_count - 1)
+    x[..., 1] = torch.clamp(x[..., 1], min=0, max=space_height_partition_count - 1)
     x_id = x[..., 0] * space_height_partition_count + x[..., 1]
-    x = x * torch.tensor([space_width_partition_gap, space_height_partition_gap]) + torch.tensor(
-        [space_width_partition_bias, space_height_partition_bias]
-    )
+    x = x * gap + bias
     return x, x_id
 
 

@@ -170,11 +170,12 @@ class TrajectoryPrefixSamplerCallback(pl.Callback):
                 pl_module.hparams.task.space_height_partition_count,
             )
         elif pl_module.hparams.task.diff_as_target:
-            diff = unflatten_trajectory_entity_dim(output)
+            diff = pl_module.maybe_unflatten_entity_dim(output)
             diff_un = unnormalize(diff, pl_module.diff_mean, pl_module.diff_std)
-            pred = sample_prefix[:, -1:] + diff_un
+            diff_un_cumsum = torch.cumsum(diff_un, dim=1)
+            pred = sample_prefix[:, -1:] + diff_un_cumsum
         else:
-            pred = unflatten_trajectory_entity_dim(output)
+            pred = pl_module.maybe_unflatten_entity_dim(output)
             pred = unnormalize(pred, pl_module.data_mean, pl_module.data_std)
 
         samples = torch.cat([sample_prefix, pred], dim=1).cpu().numpy()

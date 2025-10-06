@@ -21,5 +21,10 @@ def get_model(name, args, device):
 
         return TransformerModel(**args)
 
+    elif name == "trajtransformer":
+        from .trajtransformer import TrajTransformerModel
+
+        return TrajTransformerModel(**args)
+
     else:
         raise ValueError(f"Invalid model name: {name}")

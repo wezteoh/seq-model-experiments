@@ -45,15 +45,21 @@ class BaseSequenceTask(pl.LightningModule):
                 loss = F.mse_loss(output.float(), y.float())
             else:
                 loss = F.mse_loss(output, y)
+        elif self.hparams.task.loss == "mae":
+            output = pred.values
+            if self.hparams.trainer.accelerator == "cpu":
+                loss = F.l1_loss(output.float(), y.float())
+            else:
+                loss = F.l1_loss(output, y)
         return loss
 
     def forward(self, x):
         """Passes a batch through the encoder, backbone, and decoder"""
 
-        if self.hparams.model.args.input_type == "value":
-            assert len(x.shape) == 3  # B,T,C
-        elif self.hparams.model.args.input_type == "token":
-            assert len(x.shape) == 2  # B,T
+        # if self.hparams.model.args.input_type == "value":
+        #     assert len(x.shape) == 3  # B,T,C
+        # elif self.hparams.model.args.input_type == "token":
+        #     assert len(x.shape) == 2  # B,T
 
         pred = self.model.forward(x)
 
@@ -239,17 +245,19 @@ class MNISTGenerationTask(BaseSequenceTask):
 class TrajectoryGenerationTask(BaseSequenceTask):
     def __init__(self, config):
         super().__init__(config)
+        if self.hparams.task.diff_in_input:
+            assert self.hparams.task.diff_as_target
         if self.hparams.task.input_type == "value" or self.hparams.task.target_type == "value":
-            self.data_mean = torch.tensor(self.hparams.task.data_mean)
-            self.data_std = torch.tensor(self.hparams.task.data_std)
+            self.register_buffer("data_mean", torch.tensor(self.hparams.task.data_mean))
+            self.register_buffer("data_std", torch.tensor(self.hparams.task.data_std))
             self.diff_as_target = self.hparams.task.diff_as_target
             if self.hparams.task.diff_as_target:
                 assert (
                     self.hparams.task.input_type == "value"
                     and self.hparams.task.target_type == "value"
                 )
-                self.diff_mean = torch.tensor(self.hparams.task.diff_mean)
-                self.diff_std = torch.tensor(self.hparams.task.diff_std)
+                self.register_buffer("diff_mean", torch.tensor(self.hparams.task.diff_mean))
+                self.register_buffer("diff_std", torch.tensor(self.hparams.task.diff_std))
         if self.hparams.task.target_type == "token" or self.hparams.task.input_type == "token":
             self.space_width_partition_gap = (
                 self.hparams.task.space_width / self.hparams.task.space_width_partition_count
@@ -259,6 +267,18 @@ class TrajectoryGenerationTask(BaseSequenceTask):
             )
             self.space_width_partition_bias = self.space_width_partition_gap / 2
             self.space_height_partition_bias = self.space_height_partition_gap / 2
+
+    def maybe_flatten_entity_dim(self, x: torch.tensor):
+        if self.hparams.task.flatten_entity_dim:
+            return flatten_trajectory_entity_dim(x)
+        else:
+            return x
+
+    def maybe_unflatten_entity_dim(self, x: torch.tensor):
+        if self.hparams.task.flatten_entity_dim:
+            return unflatten_trajectory_entity_dim(x)
+        else:
+            return x
 
     def make_model_inputs_and_targets(self, batch: torch.tensor):
         if self.hparams.task.input_type == "token" or self.hparams.task.target_type == "token":
@@ -271,14 +291,24 @@ class TrajectoryGenerationTask(BaseSequenceTask):
                 self.hparams.task.space_width_partition_count,
                 self.hparams.task.space_height_partition_count,
             )
+        if self.hparams.task.diff_in_input or self.hparams.task.diff_as_target:
+            diff = torch.diff(batch, dim=1)
+            diff_n = normalize(diff, self.diff_mean, self.diff_std)
+            diff_n = torch.cat([torch.zeros_like(diff_n[:, :1]), diff_n], dim=1)
+            diff_nf = self.maybe_flatten_entity_dim(diff_n)
+
         if self.hparams.task.input_type == "value":
             batch_n = normalize(
                 discretized_batch if self.hparams.task.target_type == "token" else batch,
                 self.data_mean,
                 self.data_std,
             )
-            batch_nf = flatten_trajectory_entity_dim(batch_n)
-            x = batch_nf[:, :-1]
+            if self.hparams.task.diff_in_input:
+                input_n = torch.cat([batch_n, diff_n], dim=-1)
+            else:
+                input_n = batch_n
+            input_nf = self.maybe_flatten_entity_dim(input_n)
+            x = input_nf[:, :-1]
             x = cast_floats_by_trainer_precision(x, precision=self.trainer.precision)
         else:
             x = discretized_batch_id[:, :-1]
@@ -286,28 +316,37 @@ class TrajectoryGenerationTask(BaseSequenceTask):
         if self.hparams.task.target_type == "token":
             y = discretized_batch_id[:, 1:]
         elif self.diff_as_target:
-            diff = torch.diff(batch, dim=1)
-            diff_n = normalize(diff, self.diff_mean, self.diff_std)
-            diff_nf = flatten_trajectory_entity_dim(diff_n)
-            y = diff_nf
+            y = diff_nf[:, 1:]
             y = cast_floats_by_trainer_precision(y, precision=self.trainer.precision)
         else:
-            y = batch_nf[:, 1:]
+            y = self.maybe_flatten_entity_dim(batch_n)[:, 1:]
             y = cast_floats_by_trainer_precision(y, precision=self.trainer.precision)
 
         return x, y
 
     def model_output2input_preprocess(self, x: torch.tensor, prefix: torch.tensor):
+        if self.hparams.task.diff_in_input:
+            prefix_pos_nf = prefix[..., :2]
+        else:
+            prefix_pos_nf = prefix
         if self.diff_as_target:
-            diff = unflatten_trajectory_entity_dim(x)
-            diff_un = unnormalize(diff, self.diff_mean, self.diff_std)
-            value_un = unflatten_trajectory_entity_dim(prefix[:, -1:]) + diff_un
-            value_n = normalize(value_un, self.data_mean, self.data_std)
-            x = flatten_trajectory_entity_dim(value_n)
-            x = cast_floats_by_trainer_precision(x, precision=self.trainer.precision)
+            diff_n = self.maybe_unflatten_entity_dim(x)
+            diff_un = unnormalize(diff_n, self.diff_mean, self.diff_std)
+            prefix_tail_nf = prefix_pos_nf[:, -1:]
+            prefix_tail_n = self.maybe_unflatten_entity_dim(prefix_tail_nf)
+            prefix_tail_un = unnormalize(prefix_tail_n, self.data_mean, self.data_std)
+            input_pos_un = prefix_tail_un + diff_un
+            input_n = normalize(input_pos_un, self.data_mean, self.data_std)
+            if self.hparams.task.diff_in_input:
+                input_n = torch.cat([input_n, diff_n], dim=-1)
+            else:
+                input_n = input_n
+            input_nf = self.maybe_flatten_entity_dim(input_n)
+            x = cast_floats_by_trainer_precision(input_nf, precision=self.trainer.precision)
+            return x
 
         elif self.hparams.task.target_type == "token" and self.hparams.task.input_type == "value":
-            x = reverse_discretize_trajectory(
+            input_pos_un = reverse_discretize_trajectory(
                 x,
                 self.space_width_partition_gap,
                 self.space_height_partition_gap,
@@ -316,9 +355,13 @@ class TrajectoryGenerationTask(BaseSequenceTask):
                 self.hparams.task.space_width_partition_count,
                 self.hparams.task.space_height_partition_count,
             )
-            x = normalize(x, self.data_mean, self.data_std)
-            x = flatten_trajectory_entity_dim(x)
-            x = cast_floats_by_trainer_precision(x, precision=self.trainer.precision)
+            input_n = normalize(x, self.data_mean, self.data_std)
+            if self.hparams.task.diff_in_input:
+                raise NotImplementedError(
+                    "diff_in_input is not supported for target_type == 'token' and input_type == 'value'"
+                )
+            input_nf = self.maybe_flatten_entity_dim(input_n)
+            x = cast_floats_by_trainer_precision(input_nf, precision=self.trainer.precision)
         return x
 
     def validation_step(self, batch, batch_idx, dataloader_idx=0):
@@ -346,11 +389,12 @@ class TrajectoryGenerationTask(BaseSequenceTask):
                         self.hparams.task.space_height_partition_count,
                     )
                 elif self.hparams.task.diff_as_target:
-                    diff = unflatten_trajectory_entity_dim(output)
+                    diff = self.maybe_unflatten_entity_dim(output)
                     diff_un = unnormalize(diff, self.diff_mean, self.diff_std)
-                    pred = batch_prefix[:, -1:] + diff_un
+                    diff_un_cumsum = torch.cumsum(diff_un, dim=1)
+                    pred = batch_prefix[:, -1:] + diff_un_cumsum
                 else:
-                    pred = unflatten_trajectory_entity_dim(output)
+                    pred = self.maybe_unflatten_entity_dim(output)
                     pred = unnormalize(pred, self.data_mean, self.data_std)
 
                 displacement = torch.norm(pred - batch[:, metric_detail["prefix_length"] :], dim=-1)

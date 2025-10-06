@@ -62,7 +62,7 @@ class RoPE(nn.Module):
         return x
 
 
-class CausalMultiheadSelfAttention(nn.Module):
+class MultiheadSelfAttention(nn.Module):
     def __init__(
         self,
         d_model: int,
@@ -71,6 +71,7 @@ class CausalMultiheadSelfAttention(nn.Module):
         theta: float = 10000.0,
         max_seq_len: int = 1024,
         device: str = None,
+        causal: bool = True,
     ):
         super().__init__()
         self.d_model = d_model
@@ -87,6 +88,7 @@ class CausalMultiheadSelfAttention(nn.Module):
         self.k_proj = nn.Linear(self.d_model, self.d_model, bias=False)
         self.v_proj = nn.Linear(self.d_model, self.d_model, bias=False)
         self.output_proj = nn.Linear(self.d_model, self.d_model, bias=False)
+        self.causal = causal
 
     def forward(
         self,
@@ -100,9 +102,9 @@ class CausalMultiheadSelfAttention(nn.Module):
         k = self.k_proj(x)
         v = self.v_proj(x)
 
-        q = einops.rearrange(q, "b seq_len (h d_k) -> b h seq_len d_k", h=self.num_heads)
-        k = einops.rearrange(k, "b seq_len (h d_k) -> b h seq_len d_k", h=self.num_heads)
-        v = einops.rearrange(v, "b seq_len (h d_v) -> b h seq_len d_v", h=self.num_heads)
+        q = einops.rearrange(q, "... seq_len (h d_k) -> ... h seq_len d_k", h=self.num_heads)
+        k = einops.rearrange(k, "... seq_len (h d_k) -> ... h seq_len d_k", h=self.num_heads)
+        v = einops.rearrange(v, "... seq_len (h d_v) -> ... h seq_len d_v", h=self.num_heads)
 
         if self.rope is not None:
             q = self.rope(q, token_positions)
@@ -122,12 +124,15 @@ class CausalMultiheadSelfAttention(nn.Module):
             x = F.scaled_dot_product_attention(q, k, v, None)  # b, h, seq_len, d_v
 
         else:
-            mask = torch.tril(torch.ones(x.shape[1], x.shape[1]))
-            mask = mask.bool().to(x.device)
+            if self.causal:
+                mask = torch.tril(torch.ones(x.shape[1], x.shape[1]))
+                mask = mask.bool().to(x.device)
+            else:
+                mask = None
 
             x = F.scaled_dot_product_attention(q, k, v, mask)  # b, h, seq_len, d_v
 
-        x = einops.rearrange(x, "b h seq_len d_v -> b seq_len (h d_v)")
+        x = einops.rearrange(x, "... h seq_len d_v -> ... seq_len (h d_v)")
 
         x = self.output_proj(x)
 
@@ -144,10 +149,11 @@ class TransformerBlock(nn.Module):
         theta: float = 10000.0,
         max_seq_len: int = 1024,
         device: str = None,
+        causal: bool = True,
     ):
         super().__init__()
-        self.attn = CausalMultiheadSelfAttention(
-            d_model, num_heads, use_rope, theta, max_seq_len, device
+        self.attn = MultiheadSelfAttention(
+            d_model, num_heads, use_rope, theta, max_seq_len, device, causal
         )
         self.ln1 = RMSNorm(d_model)
         self.ffn = PositionwiseFFN(d_model, d_ff)

@@ -338,8 +338,8 @@ class TrajectoryDataModule(pl.LightningDataModule):
         pass
 
     def setup(self, stage=None):
-        train_data = np.load(self.data_dir / "train_clean.p", allow_pickle=True)
-        test_data = np.load(self.data_dir / "test_clean.p", allow_pickle=True)
+        train_data = np.load(self.data_dir / "train_clean.npy", allow_pickle=True)
+        test_data = np.load(self.data_dir / "test_clean.npy", allow_pickle=True)
         self.dataset = {
             "train": train_data,
             "test": test_data,

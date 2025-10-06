@@ -1,0 +1,98 @@
+# Minimal, fast debug run on CPU
+wandb:
+  project: trajtransformer-traj
+  name: dryrun
+
+train:
+  seed: 0
+  validate_at_start: true
+  test: false
+  ckpt: null
+  ckpt_dir: ~/ckpt
+
+# Lightning Trainer
+trainer:
+  accelerator: cpu
+  devices: 1
+  precision: bf16-true
+  max_epochs: 1
+  fast_dev_run: true           # one batch train/val/test and exit
+  limit_train_batches: 2       # safety; only a couple batches
+  limit_val_batches: 1
+  limit_test_batches: 0
+  log_every_n_steps: 1
+  enable_checkpointing: false
+
+task:
+  name: TrajectoryGenerationTask
+  target_type: value
+  input_type: value
+  diff_as_target: true
+  diff_in_input: true
+  data_mean: [45.0, 25.0]
+  data_std: [22.5, 12.5]
+  diff_mean: [0.0, 0.0]
+  diff_std: [0.75, 0.75]
+  loss: mse
+  flatten_entity_dim: false
+  # space_width: 94.0
+  # space_height: 50.0
+  # space_width_partition_count: 94
+  # space_height_partition_count: 50
+
+dataset:
+  name: TrajectoryDataModule
+  bsz: 8
+  num_workers: 0
+  data_dir: ~/data/traj/basketball
+
+metrics:
+  loss: null
+  ade: # if idxs given, additionally log stratified metric for each group
+    prefix_length: 30
+    grouping:
+      ball: [0]
+      player_team_a: [1, 2, 3, 4, 5]
+      player_team_b: [6, 7, 8, 9, 10]
+
+# Small model for speed (used by CPU class after the code tweak below)
+model:
+  name: trajtransformer
+  args:
+    context_length: 49
+    n_entity: 11
+    input_value_size: 4
+    n_layer_spatial: 2
+    d_entity: 32
+    n_head_spatial: 4
+    d_ff_spatial: 64
+    n_layer_temporal: 4
+    d_model: 64
+    n_head_temporal: 4
+    d_ff_temporal: 256
+    out_value_size: 2
+    use_rope: True
+    theta: 10000.0
+    input_type: value
+    output_type: value
+
+# Optimizer
+optimizer:
+  lr: 0.001
+  weight_decay: 0.01
+  lr_schedule:
+    div_factor: 15
+    final_div_factor: 500
+    pct_start: 0.1
+    total_steps: null
+
+callbacks:
+  TrajectoryPrefixSamplerCallback:
+    num_samples: 3
+    every_n_epochs: 1
+    sample_prefix_length: 25
+    max_length: 50
+    downsampling_ratio: 5
+    fps: 2
+    game: basketball
+    sample_dir: ~/samples/transformer-traj-dryrun
